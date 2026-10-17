@@ -1,0 +1,2 @@
+// Bloqueado deliberadamente hasta validar el contrato real del Apps Script.
+window.FincaSync={async run(){const status=document.getElementById("sync-status"),url=window.FINCA_CONFIG?.gasWebAppUrl;if(!window.FINCA_CONFIG?.syncEnabled||!url||url.includes("PEGAR_URL")){status.textContent="Sincronización desactivada: falta configurar y verificar el contrato de Google Apps Script.";return false}status.textContent="URL configurada, pero falta implementar el contrato validado. No se enviaron registros.";return false}};
