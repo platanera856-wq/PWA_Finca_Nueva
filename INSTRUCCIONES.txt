@@ -1,13 +1,30 @@
-ARCHIVOS CORREGIDOS PARA LA LECTURA QR
+AJUSTE DE INICIO AUTOMÁTICO DE CÁMARA Y PRUEBA DE VOZ
 
-1. Reemplace el index.html de la raíz del proyecto por este index.html.
-2. Reemplace js/camera.js por el camera.js de esta carpeta.
-3. Copie su archivo html5-qrcode.min.js ya descargado a la carpeta js del proyecto original.
-   La ruta debe ser: js/html5-qrcode.min.js
-4. No reemplace config.js, db.js, voice.js, sync.js, app.js, css/app.css ni otros archivos.
-5. Publique los tres cambios (index.html, js/camera.js y js/html5-qrcode.min.js) en GitHub Pages.
-6. Pruebe la URL HTTPS de GitHub Pages. Si la PWA estaba instalada, cierre y abra de nuevo; si aparece la versión anterior, actualice o borre los datos en caché del sitio.
+IMPORTANTE: Este paquete contiene ARCHIVOS PARA REEMPLAZAR, no es una copia completa de la aplicación.
+Conserve las carpetas css, assets y demás archivos que ya están en su repositorio.
 
-Comportamiento: al detectar un QR, el texto completo del código se copia al campo "Caballón / lote".
+Archivos incluidos y destinos en GitHub:
+- index.html -> raíz del repositorio, reemplaza el existente
+- sw.js -> raíz del repositorio, reemplaza el existente
+- js/camera.js -> carpeta js, reemplaza el existente
+- js/voice.js -> carpeta js, reemplaza el existente
+- js/app.js -> carpeta js, reemplaza el existente
 
-Nota: estos archivos se han preparado a partir del HTML y camera.js compartidos en el chat. No he podido ejecutar la cámara en su teléfono ni verificar el contenido binario de html5-qrcode.min.js descargado en su computador. No dé por validada la lectura hasta probar con un QR real.
+No elimine ni cambie:
+- js/html5-qrcode.min.js (la biblioteca QR ya subida)
+- js/config.js
+- js/db.js
+- js/sync.js
+- css/app.css
+- manifest.webmanifest
+
+Después de subir los cinco archivos, pulse Commit changes y espere a que GitHub Pages termine de publicar.
+En Android, abra el sitio, recargue y compruebe:
+1) la cámara intenta arrancar al abrir la página; si el navegador lo bloquea, use Reintentar cámara / QR;
+2) la bienvenida intenta sonar automáticamente; si no se oye, pulse Dictar en el campo seleccionado, permita el micrófono y escuche el mensaje de prueba.
+
+LÍMITES CONOCIDOS:
+- El reconocimiento de voz de navegador puede requerir internet; este paquete NO añade todavía el modelo de voz offline.
+- El navegador puede bloquear cámara/audio automáticos o pedir interacción explícita por seguridad.
+- Google Sheets sigue sin configurarse en esta PWA.
+- No se ha probado con el teléfono físico del usuario.
