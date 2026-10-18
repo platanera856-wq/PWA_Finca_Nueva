@@ -139,23 +139,45 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
-  // La pronunciación puede variar, pero solo se acepta una opción real y no ambigua del catálogo.
+  // Comprensión avanzada de nombres, labores e insumos.
+  // Siempre devuelve un elemento real del catálogo; si hay dos opciones próximas,
+  // exige repetir o aportar más palabras, en lugar de seleccionar al azar.
   function canonicalSpeech(text) {
     let s = normalize(text);
-    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj)\b/g,'deshoje');
-    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g,'kcl');
-    s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    // Variantes fonéticas frecuentes de reconocimiento de insumos y nombres propios.
-    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas)\b/g, 'insecticida');
-    // Las vocales y consonantes pueden variar en las transcripciones de nombres propios.
-    s = s.replace(/\b(elquin|elkyn|elkinh)\b/g, 'elkin');
-    // Variantes comunes de los dos insumos señalados en las pruebas de campo.
-    s = s.replace(/\b(codornasa|codornassa|codorna za)\b/g, 'codornaza');
-    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina za)\b/g, 'gallinaza');
+    // Variaciones fonéticas vistas en pruebas de campo.
+    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|des hoje)\b/g, 'deshoje');
+    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g, 'kcl');
+    s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g, 'dap');
+    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas|insetisida)\b/g, 'insecticida');
+    // Elkin suele aparecer como Elquin, Elkyn o Elkim.
+    s = s.replace(/\b(elquin|elkyn|elkinh|elkim|elquim|elkin)\b/g, 'elkin');
+    // En español, el reconocedor puede confundir s/z al transcribir Florez.
+    s = s.replace(/\b(flores|florez)\b/g, 'florez');
+    // El apellido Restrepo puede salir separado en dos o tres fragmentos.
+    s = s.replace(/\b(sandra\s+)?(rest\s+repo|res\s+trepo|restre\s+po|resrepo|destrepo|restreppo)\b/g,
+      (all, first) => (first ? 'sandra ' : '') + 'restrepo');
+    // Variantes de insumos que se han observado en campo.
+    s = s.replace(/\b(codornasa|codornassa|codorna\s+za|codornaza)\b/g, 'codornaza');
+    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina\s+za|gallinaza)\b/g, 'gallinaza');
     return s;
   }
   const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor']);
-  function meaningfulTokens(text) { return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t)); }
+  function meaningfulTokens(text) {
+    return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t));
+  }
+  function queryTokenVariants(text) {
+    const tokens = meaningfulTokens(text);
+    const out = new Set(tokens);
+    // Los reconocedores a veces separan una palabra en dos: "rest repo", "des hoje".
+    // Probamos uniones de dos y tres tokens, sin modificar el nombre del catálogo.
+    for (let i = 0; i < tokens.length; i++) {
+      for (let width = 2; width <= 3 && i + width <= tokens.length; width++) {
+        const joined = tokens.slice(i, i + width).join('');
+        if (joined.length >= 4 && joined.length <= 22) out.add(joined);
+      }
+    }
+    return [...out];
+  }
   function editDistance(a, b) {
     if (a === b) return 0;
     if (Math.abs(a.length - b.length) > 2) return 99;
@@ -173,13 +195,20 @@
     if (queryToken === itemToken) return true;
     const shortest = Math.min(queryToken.length, itemToken.length);
     const distance = editDistance(queryToken, itemToken);
-    // Nombres: admite una diferencia para nombres medianos y hasta dos en apellidos largos.
-    // Insumos: admite una diferencia fonética en palabras largas, sin confundir categorías distintas.
+    // Tolerancia fonética escalonada. El margen es algo mayor para palabras largas,
+    // pero nunca basta por sí solo para elegir entre dos elementos igualmente probables.
     if (type === 'trabajador') {
-      if (shortest >= 5 && distance <= 1) return true;
+      if (shortest >= 4 && distance <= 1) return true;
       if (shortest >= 8 && distance <= 2) return true;
     }
-    if (type === 'insumo' && shortest >= 8 && distance <= 1) return true;
+    if (type === 'labor') {
+      if (shortest >= 5 && distance <= 1) return true;
+      if (shortest >= 9 && distance <= 2) return true;
+    }
+    if (type === 'insumo') {
+      if (shortest >= 6 && distance <= 1) return true;
+      if (shortest >= 10 && distance <= 2) return true;
+    }
     return false;
   }
   function matchCatalogVoice(text, items, type) {
@@ -187,40 +216,51 @@
     if (!query || !items || !items.length) return null;
     const exact = items.filter(item => canonicalSpeech(item.nombre) === query || canonicalSpeech(item.id) === query);
     if (exact.length === 1) return exact[0];
-    const queryTokens = new Set(meaningfulTokens(query));
-    // Primer nombre, como en la interfaz original; si hay homónimos, exige otra palabra.
+
+    const queryList = queryTokenVariants(query);
+    const queryTokens = new Set(queryList);
+    // Se acepta el primer nombre solo si es único; con homónimos se compara también el apellido.
     if (type === 'trabajador') {
       const firstNameMatches = items.filter(item => {
-        const words = canonicalSpeech(item.nombre).split(/\s+/).filter(Boolean);
-        return words.length && queryTokens.has(words[0]) && words[0].length > 2;
+        const words = meaningfulTokens(item.nombre);
+        return words.length && queryList.some(q => tokenMatches(q, words[0], 'trabajador')) && words[0].length > 2;
       });
       if (firstNameMatches.length === 1) return firstNameMatches[0];
       if (firstNameMatches.length > 1) {
-        const ranked = firstNameMatches.map(item => ({item, score: meaningfulTokens(item.nombre).filter(t => queryTokens.has(t)).length})).sort((a,b)=>b.score-a.score);
-        if (ranked.length && ranked[0].score > ranked[1].score) return ranked[0].item;
+        const rankedFirst = firstNameMatches.map(item => {
+          const words = meaningfulTokens(item.nombre);
+          const hits = words.filter(t => queryList.some(q => tokenMatches(q, t, 'trabajador'))).length;
+          const exactHits = words.filter(t => queryTokens.has(t)).length;
+          return {item, score:hits * 10 + exactHits * 4};
+        }).sort((a,b)=>b.score-a.score);
+        if (rankedFirst.length && rankedFirst[0].score > rankedFirst[1].score + 3) return rankedFirst[0].item;
       }
     }
-    // Tokens exclusivos pesan más que palabras repetidas como «control», «cuido» o «alim».
+
     const termFrequency = {};
     for (const item of items) for (const term of new Set(meaningfulTokens(item.nombre))) termFrequency[term]=(termFrequency[term]||0)+1;
     const ranked = [];
     for (const item of items) {
       let itemTokens = meaningfulTokens(item.nombre);
-      if (type === 'labor' && /deshoj|deshoje|desoj/.test(canonicalSpeech(text))) itemTokens = itemTokens.map(t => /deshoj|desoj/.test(t) ? 'deshoje' : t);
-      const queryList = [...queryTokens];
+      if (type === 'labor' && /deshoj|desoj/.test(query)) itemTokens = itemTokens.map(t => /deshoj|desoj/.test(t) ? 'deshoje' : t);
       const hit = itemTokens.filter(t => queryList.some(q => tokenMatches(q, t, type)));
       if (!hit.length) continue;
       let score = 0;
-      for (const term of new Set(hit)) score += (termFrequency[term] || 0) === 1 ? 10 : 1;
-      if (itemTokens.length > 0 && itemTokens.every(t => queryList.some(q => tokenMatches(q, t, type)))) score += 20;
-      // La coincidencia fonética aproximada tiene menos peso que la exacta.
+      for (const term of new Set(hit)) score += (termFrequency[term] || 0) === 1 ? 10 : 2;
+      const fullyMatched = itemTokens.length > 0 && itemTokens.every(t => queryList.some(q => tokenMatches(q, t, type)));
+      if (fullyMatched) score += 22;
       const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
-      score += exactHitCount * 3;
-      ranked.push({item,score});
+      score += exactHitCount * 4;
+      // Un candidato incompleto pesa menos que el nombre completo pronunciado.
+      if (!fullyMatched && itemTokens.length > 1) score -= 3;
+      ranked.push({item,score,fullyMatched,exactHitCount});
     }
     ranked.sort((a,b)=>b.score-a.score);
-    if (!ranked.length || ranked[0].score < 10) return null;
-    if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
+    if (!ranked.length || ranked[0].score < 9) return null;
+    if (ranked.length > 1) {
+      const margin = ranked[0].score - ranked[1].score;
+      if (margin <= 2) return null;
+    }
     return ranked[0].item;
   }
   function matchCaballon(code) {
