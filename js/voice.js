@@ -321,7 +321,7 @@
             video: false
           });
           audioContext = await getLocalAudioContext();
-          recognizer = new offlineModel.KaldiRecognizer();
+          recognizer = new offlineModel.KaldiRecognizer(16000);
           recognizer.on('result', message => {
             const text = String(message && message.result && message.result.text || '').trim();
             if (text) finish(null, text);
