@@ -1,8 +1,7 @@
-// Voz en español. El reconocimiento del navegador puede necesitar internet; el motor offline aún no está incluido.
+// Voz en español con reconocimiento Vosk local; el modelo se guarda en Cache Storage para usarlo sin internet.
 (() => {
   'use strict';
   const $ = id => document.getElementById(id);
-  let activeRecognition = null;
   let welcomePlayed = false;
   const greetings = [
     'Gracias por su trabajo.',
@@ -20,7 +19,7 @@
     const voices = window.speechSynthesis.getVoices() || [];
     return voices.find(v => /^es-CO$/i.test(v.lang)) || voices.find(v => /^es(-|$)/i.test(v.lang)) || null;
   }
-  function supportsRecognition() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+  function supportsRecognition() { return !!((window.Vosk && typeof window.Vosk.createModel === 'function') || window.SpeechRecognition || window.webkitSpeechRecognition); }
   function supportsSpeechOutput() { return ('speechSynthesis' in window) && typeof SpeechSynthesisUtterance === 'function'; }
   function say(text, opts = {}) {
     return new Promise(resolve => {
@@ -43,22 +42,211 @@
   }
   // acceptCandidate permite seleccionar una alternativa de reconocimiento que coincida
   // con un catálogo o que contenga un número válido, y no quedarse con la primera transcripción errónea.
-  function listen(timeoutMs = 25000, acceptCandidate = null) {
+  // Reconocimiento local Vosk. El modelo comprimido se conserva en Cache Storage para
+  // que una apertura posterior en modo avión no necesite descargarlo otra vez.
+  const VOSK_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js';
+  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v1';
+  const VOICE_MODEL_KEY = new URL('./models/vosk-model-small-es-0.42.tar.gz', location.href).href;
+  const VOICE_MODEL_PARTS = [
+    './vosk-model-small-es-0.42.part01',
+    './vosk-model-small-es-0.42.part02'
+  ];
+  const VOICE_MODEL_BYTES = 39816269;
+  let offlineModel = null;
+  let offlineModelPromise = null;
+  let archiveObjectUrl = null;
+  let activeLocalSession = null;
+
+  async function readResponseBytes(response, index, downloadedBefore) {
+    const expected = index === 0 ? 20000000 : 19816269;
+    const headerTotal = Number(response.headers.get('content-length')) || expected;
+    if (!response.body || !response.body.getReader) {
+      const buffer = await response.arrayBuffer();
+      const downloaded = downloadedBefore + buffer.byteLength;
+      status(`Descargando el reconocimiento local en español: ${Math.min(100, Math.round(downloaded / VOICE_MODEL_BYTES * 100))}%. Mantenga internet activo.`);
+      return new Uint8Array(buffer);
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      chunks.push(result.value);
+      received += result.value.byteLength;
+      const approxTotal = Math.max(expected, headerTotal);
+      const projected = downloadedBefore + Math.min(received, approxTotal);
+      status(`Descargando el reconocimiento local en español: ${Math.min(100, Math.round(projected / VOICE_MODEL_BYTES * 100))}%. Mantenga internet activo.`);
+    }
+    const out = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
+    return out;
+  }
+
+  async function ensureVoskRuntimeCached() {
+    if (!('caches' in window)) throw new Error('El navegador no permite guardar el motor de voz en el teléfono.');
+    const cache = await caches.open('finca-pwa-v050-voz-local');
+    const cached = await cache.match(VOSK_SCRIPT_URL);
+    if (cached) return true;
+    if (!navigator.onLine) throw new Error('La biblioteca Vosk no está guardada en este teléfono. Abra la aplicación con internet para completar la preparación de voz.');
+    const response = await fetch(VOSK_SCRIPT_URL, { mode: 'cors', cache: 'no-cache' });
+    if (!response.ok) throw new Error('No se pudo guardar la biblioteca Vosk para usarla sin internet.');
+    await cache.put(VOSK_SCRIPT_URL, response.clone());
+    return true;
+  }
+
+  async function getModelArchive() {
+    if (!('caches' in window)) throw new Error('Este navegador no permite conservar el modelo de voz en el teléfono. Actualice Chrome.');
+    const cache = await caches.open(VOICE_MODEL_CACHE);
+    const cached = await cache.match(VOICE_MODEL_KEY);
+    if (cached) {
+      status('Modelo de español encontrado en el teléfono. Preparando la voz sin conexión…');
+      return await cached.blob();
+    }
+    if (!navigator.onLine) {
+      throw new Error('Todavía no se ha guardado el modelo de voz en este teléfono. Conéctese a internet y espere a que aparezca “Voz sin conexión lista”.');
+    }
+
+    const pieces = [];
+    let downloaded = 0;
+    for (let i = 0; i < VOICE_MODEL_PARTS.length; i++) {
+      status(`Descargando el modelo español para uso sin internet (${i + 1} de ${VOICE_MODEL_PARTS.length})…`);
+      const url = new URL(VOICE_MODEL_PARTS[i], location.href).href;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`No se pudo descargar la parte ${i + 1} del modelo de voz (HTTP ${response.status}). Revise que los dos archivos estén publicados en la raíz del repositorio.`);
+      const bytes = await readResponseBytes(response, i, downloaded);
+      pieces.push(bytes);
+      downloaded += bytes.byteLength;
+    }
+    const total = pieces.reduce((sum, item) => sum + item.byteLength, 0);
+    if (total < 35000000) throw new Error('La descarga del modelo de voz parece incompleta. Revise los dos archivos part01 y part02 en GitHub.');
+    const blob = new Blob(pieces, { type: 'application/gzip' });
+    try {
+      await cache.put(VOICE_MODEL_KEY, new Response(blob, { headers: { 'Content-Type': 'application/gzip' } }));
+    } catch (error) {
+      throw new Error('El modelo se descargó, pero el teléfono no pudo guardarlo para futuras sesiones sin internet. Libere espacio de almacenamiento y vuelva a abrir la aplicación con conexión.');
+    }
+    status('Modelo guardado en el teléfono. Cargando el motor de reconocimiento…');
+    return blob;
+  }
+
+  async function prepareOffline() {
+    if (offlineModel) return true;
+    if (offlineModelPromise) return offlineModelPromise;
+    offlineModelPromise = (async () => {
+      if (!window.Vosk || typeof window.Vosk.createModel !== 'function') {
+        throw new Error('No se pudo cargar la biblioteca local de voz. Abra la aplicación con internet una vez y espere a que termine la preparación.');
+      }
+      await ensureVoskRuntimeCached();
+      const archive = await getModelArchive();
+      archiveObjectUrl = URL.createObjectURL(archive);
+      try {
+        status('Inicializando el motor de voz en español. Puede tardar un poco la primera vez…');
+        offlineModel = await window.Vosk.createModel(archiveObjectUrl);
+        if (!offlineModel || typeof offlineModel.KaldiRecognizer !== 'function') throw new Error('El motor no devolvió un reconocedor válido.');
+        status('Voz sin conexión lista.');
+        return true;
+      } catch (error) {
+        throw new Error('No se pudo inicializar el modelo de español. Verifique que las dos partes del modelo se hayan publicado completas. Detalle: ' + (error && error.message ? error.message : error));
+      } finally {
+        if (archiveObjectUrl) { URL.revokeObjectURL(archiveObjectUrl); archiveObjectUrl = null; }
+      }
+    })().catch(error => {
+      status(error && error.message ? error.message : 'No se pudo preparar la voz sin conexión.');
+      throw error;
+    }).finally(() => { offlineModelPromise = null; });
+    return offlineModelPromise;
+  }
+
+  function listenLocal(timeoutMs = 25000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let mediaStream = null;
+      let audioContext = null;
+      let source = null;
+      let processor = null;
+      let recognizer = null;
+      let timer = null;
+
+      const cleanup = async () => {
+        if (processor) { try { processor.disconnect(); } catch (_) {} processor.onaudioprocess = null; }
+        if (source) { try { source.disconnect(); } catch (_) {} }
+        if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
+        if (recognizer) { try { recognizer.remove(); } catch (_) {} }
+        if (audioContext && audioContext.state !== 'closed') { try { await audioContext.close(); } catch (_) {} }
+        if (activeLocalSession && activeLocalSession.recognizer === recognizer) activeLocalSession = null;
+      };
+      const finish = (error, text) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        void cleanup().then(() => {
+          if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
+          else { status('Voz sin conexión lista.'); resolve(text); }
+        });
+      };
+
+      timer = setTimeout(() => finish(new Error('No se escuchó una respuesta.')), timeoutMs);
+      (async () => {
+        try {
+          if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+            throw new Error('Este navegador no ofrece acceso al micrófono. Abra la aplicación segura de GitHub Pages en Chrome.');
+          }
+          if (!offlineModel) await prepareOffline();
+          status('Escuchando sin internet…');
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 },
+            video: false
+          });
+          try { audioContext = new AudioContext({ sampleRate: 16000 }); }
+          catch (_) { audioContext = new AudioContext(); }
+          await audioContext.resume();
+          recognizer = new offlineModel.KaldiRecognizer();
+          recognizer.on('result', message => {
+            const text = String(message && message.result && message.result.text || '').trim();
+            if (text) finish(null, text);
+          });
+          recognizer.on('partialresult', () => {
+            if (!settled) status('Escuchando sin internet…');
+          });
+          source = audioContext.createMediaStreamSource(mediaStream);
+          processor = audioContext.createScriptProcessor(4096, 1, 1);
+          processor.onaudioprocess = event => {
+            if (settled || !recognizer) return;
+            try { recognizer.acceptWaveform(event.inputBuffer); }
+            catch (error) { console.error('Vosk acceptWaveform:', error); }
+            // La salida se silencia; el trabajador solo necesita que el micrófono quede procesado.
+            const output = event.outputBuffer;
+            if (output) for (let channel = 0; channel < output.numberOfChannels; channel++) output.getChannelData(channel).fill(0);
+          };
+          source.connect(processor);
+          processor.connect(audioContext.destination);
+          activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
+        } catch (error) {
+          let message = error && error.message ? error.message : String(error || 'Error del micrófono.');
+          if (error && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')) message = 'El micrófono está bloqueado. En Chrome, permita el micrófono para este sitio y vuelva a probar.';
+          else if (error && (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError')) message = 'No se encontró un micrófono disponible en el teléfono.';
+          finish(new Error(message));
+        }
+      })();
+    });
+  }
+
+  function listenBrowser(timeoutMs = 25000, acceptCandidate = null) {
     return new Promise((resolve, reject) => {
       const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!Recognition) { reject(new Error('Este navegador no ofrece reconocimiento de voz.')); return; }
-      if (activeRecognition) { try { activeRecognition.abort(); } catch (_) {} activeRecognition = null; }
-      const rec = new Recognition(); activeRecognition = rec;
+      if (!Recognition) { reject(new Error('El reconocimiento de voz del navegador no está disponible.')); return; }
+      const rec = new Recognition();
       rec.lang = 'es-CO'; rec.continuous = false; rec.interimResults = false; rec.maxAlternatives = 5;
       let done = false, gotText = false;
       const timer = setTimeout(() => finish(new Error('No se escuchó una respuesta.')), timeoutMs);
       function finish(err, text) {
         if (done) return; done = true; clearTimeout(timer);
-        if (activeRecognition === rec) activeRecognition = null;
         try { rec.abort(); } catch (_) {}
         if (err) reject(err); else resolve(text);
       }
-      rec.onstart = () => status('Escuchando…');
+      rec.onstart = () => status('Escuchando con el servicio del navegador…');
       rec.onresult = event => {
         const result = event.results && event.results[event.results.length - 1];
         if (!result || !result.isFinal) return;
@@ -67,8 +255,7 @@
         gotText = true;
         let chosen = candidates[0];
         if (typeof acceptCandidate === 'function') {
-          try { chosen = candidates.find(candidate => acceptCandidate(candidate)) || candidates[0]; }
-          catch (_) { chosen = candidates[0]; }
+          try { chosen = candidates.find(candidate => acceptCandidate(candidate)) || candidates[0]; } catch (_) {}
         }
         finish(null, chosen);
       };
@@ -76,14 +263,33 @@
         const err = event && event.error;
         if (err === 'not-allowed' || err === 'service-not-allowed') finish(new Error('El micrófono está bloqueado. Permita su uso para este sitio.'));
         else if (err === 'audio-capture') finish(new Error('No se encontró un micrófono disponible.'));
-        else if (err === 'network') finish(new Error('El reconocimiento de voz necesita internet en este navegador.'));
+        else if (err === 'network') finish(new Error('El reconocimiento del navegador necesita internet. El motor local todavía no está listo.'));
         else if (err === 'no-speech') finish(new Error('No se escuchó una respuesta.'));
         else finish(new Error('No se pudo reconocer la voz (' + (err || 'error') + ').'));
       };
       rec.onend = () => { if (!gotText) finish(new Error('No se escuchó una respuesta.')); };
-      try { rec.start(); } catch (e) { finish(new Error('No se pudo iniciar el micrófono.')); }
+      try { rec.start(); } catch (_) { finish(new Error('No se pudo iniciar el micrófono.')); }
     });
   }
+
+  async function listen(timeoutMs = 25000, acceptCandidate = null) {
+    // Una vez instalado el motor local, usarlo tanto con internet como en modo avión
+    // mantiene el mismo comportamiento y evita depender del servicio de Google.
+    if (offlineModel || window.Vosk) {
+      try {
+        if (!offlineModel) await prepareOffline();
+        return await listenLocal(timeoutMs);
+      } catch (error) {
+        // No se permite volver al reconocimiento online si el teléfono está desconectado.
+        if (!navigator.onLine) throw error;
+        console.warn('Vosk local no estuvo disponible; se usa reconocimiento del navegador esta vez:', error);
+        return listenBrowser(timeoutMs, acceptCandidate);
+      }
+    }
+    if (!navigator.onLine) throw new Error('El reconocimiento local no está preparado. Conéctese una vez y espere a que la voz sin conexión quede lista.');
+    return listenBrowser(timeoutMs, acceptCandidate);
+  }
+
   function normalize(s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9,.\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -145,5 +351,5 @@
     if (/\b(si|claro|correcto|afirmativo|utilice|use|listo|guardar|guarde|de acuerdo)\b/.test(s)) return true;
     return null;
   }
-  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, supportsRecognition, supportsSpeechOutput };
+  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, supportsRecognition, supportsSpeechOutput, prepareOffline, isOfflineReady: () => !!offlineModel };
 })();

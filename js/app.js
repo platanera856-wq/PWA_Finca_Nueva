@@ -290,7 +290,7 @@
   }
 
   function findVoiceMatch(text, items, kind) { return matchCatalogVoice(text,items,kind); }
-  function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono/i.test((error && error.message)||''); }
+  function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono|modelo de voz|motor local|voz sin conexión|biblioteca local de voz|vosk/i.test((error && error.message)||''); }
   async function askCatalogChoice(question, items, select, kind) {
     if (!items.length) throw new Error('La lista de '+kind+' está vacía.');
     const shortPrompt = kind==='trabajador' ? 'No está en la lista. ¿Trabajador?' : kind==='labor' ? 'No la encontré. ¿Qué labor?' : 'No lo encontré. ¿Qué insumo?';
@@ -383,6 +383,15 @@
     }
     interviewRunning=true; autoVoicePending=false; updateSaveButton();
     try {
+      // No comenzar a preguntar hasta preparar el reconocimiento local. En la primera
+      // apertura conectada esto descarga y guarda el modelo español; después sirve sin internet.
+      try {
+        await FincaVoice.prepareOffline();
+      } catch (modelError) {
+        if (!navigator.onLine) throw modelError;
+        // Respaldo temporal conectado: permite seguir probando si Vosk no carga.
+        FincaVoice.status('El reconocimiento local no se pudo preparar; esta sesión intentará usar el navegador conectado.');
+      }
       const voiceGreetingOk = await FincaVoice.welcome();
       if (!voiceGreetingOk) { autoVoicePending=true; throw new Error('El navegador bloqueó el audio. Toque la pantalla una vez para activar la voz.'); }
       if (!validEmployee()) await askCatalogChoice('¿Trabajador?',catalog.empleados,$('empleado'),'trabajador');
@@ -417,7 +426,10 @@
       }
     } catch (error) {
       showNotice(error.message || 'Se interrumpió la entrevista.', 'error');
-      await FincaVoice.say(error.message || 'Se interrumpió la voz.', {silentError:true});
+      const spokenFailure = /modelo de voz|motor local|biblioteca local|voz sin conexión|vosk/i.test(error.message || '')
+        ? 'La voz sin conexión no está lista. Revise el aviso en pantalla.'
+        : /micrófono/i.test(error.message || '') ? 'Revise el permiso del micrófono.' : 'No pude continuar. Repitamos la pregunta.';
+      await FincaVoice.say(spokenFailure, {silentError:true});
       if (isFatalVoiceError(error)) {
         autoVoicePending=true;
         showNotice((error.message || 'Voz bloqueada.') + ' Toque una vez la pantalla para volver a intentar.', 'error');
@@ -451,6 +463,12 @@
     if (autoVoicePending && !interviewRunning && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
   },true);
   void locate();
+  // Preparar el modelo local en segundo plano desde la primera apertura conectada.
+  // La persona debe esperar a que el estado indique «Voz sin conexión lista» antes de apagar internet.
+  void FincaVoice.prepareOffline().catch(error => {
+    console.warn('No se pudo preparar la voz sin conexión:', error);
+    FincaVoice.status(error && error.message ? error.message : 'No se pudo preparar el reconocimiento sin conexión.');
+  });
   void loadCatalogs();
   void renderRecords();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
