@@ -1,134 +1,113 @@
-// Lector QR local con html5-qrcode. La biblioteca debe estar en ./js/html5-qrcode.min.js.
-// Cuando se detecta un QR, su contenido se copia al campo "Caballón / lote".
+// Lector QR local. Requiere ./js/html5-qrcode.min.js, servido desde GitHub Pages.
+// Al abrir la PWA intenta iniciar cámara y lectura automáticamente; el botón sirve para reintentar.
 (() => {
   'use strict';
-
   let qrScanner = null;
   let scannerStarting = false;
   let scanHandled = false;
-
+  let lastStatus = '';
   const $ = (id) => document.getElementById(id);
 
   function setStatus(message) {
-    const status = $('qr-status');
-    if (status) status.textContent = message;
+    lastStatus = message;
+    const el = $('qr-status');
+    if (el) el.textContent = message;
   }
 
   async function stopScanner(hideArea = true) {
     const scanner = qrScanner;
     qrScanner = null;
-
     if (scanner) {
-      try {
-        if (scanner.isScanning) await scanner.stop();
-      } catch (error) {
-        // Puede que el escáner ya se haya detenido; continuamos con la limpieza.
-      }
-      try {
-        await scanner.clear();
-      } catch (error) {
-        // No impedimos cerrar la interfaz si la biblioteca ya limpió el visor.
-      }
+      try { if (scanner.isScanning) await scanner.stop(); } catch (_) {}
+      try { await scanner.clear(); } catch (_) {}
     }
-
     if (hideArea) {
       const area = $('qr-area');
       if (area) area.hidden = true;
     }
   }
 
-  function putQrIntoCaballon(decodedText) {
+  function insertQr(decodedText) {
     const field = document.querySelector('#record-form [name="caballon"]');
     const value = String(decodedText || '').trim();
-    if (field && value) {
-      field.value = value;
-      field.dispatchEvent(new Event('input', { bubbles: true }));
-      field.dispatchEvent(new Event('change', { bubbles: true }));
-      return true;
-    }
-    return false;
+    if (!field || !value) return false;
+    field.value = value;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
   }
 
-  document.addEventListener('DOMContentLoaded', () => {
-    const qrButton = $('qr-btn');
-    const stopButton = $('stop-camera');
+  async function startScanner(source = 'automatic') {
     const area = $('qr-area');
     const reader = $('qr-reader');
+    if (!area || !reader || scannerStarting || (qrScanner && qrScanner.isScanning)) return;
+    scannerStarting = true;
+    scanHandled = false;
+    area.hidden = false;
+    setStatus(source === 'automatic' ? 'Iniciando cámara y lector QR…' : 'Preparando cámara y lector QR…');
 
-    if (!qrButton || !stopButton || !area || !reader) {
-      console.error('Lector QR: faltan elementos requeridos en index.html.');
+    if (!window.isSecureContext) {
+      setStatus('La cámara necesita HTTPS. Abra la aplicación desde su dirección segura de GitHub Pages.');
+      scannerStarting = false;
+      return;
+    }
+    if (typeof window.Html5Qrcode !== 'function') {
+      setStatus('No se cargó el lector QR local. Compruebe que js/html5-qrcode.min.js esté publicado.');
+      scannerStarting = false;
       return;
     }
 
-    qrButton.addEventListener('click', async () => {
-      if (scannerStarting || (qrScanner && qrScanner.isScanning)) return;
-
-      area.hidden = false;
-      setStatus('Preparando cámara…');
-
-      if (!window.isSecureContext) {
-        setStatus('La cámara requiere una dirección HTTPS o localhost. Abra la PWA desde GitHub Pages con HTTPS.');
-        return;
-      }
-
-      if (typeof window.Html5Qrcode !== 'function') {
-        setStatus('No se cargó la biblioteca QR local. Revise que js/html5-qrcode.min.js exista y se haya publicado en GitHub Pages.');
-        return;
-      }
-
-      scannerStarting = true;
-      scanHandled = false;
-
-      try {
-        qrScanner = new window.Html5Qrcode('qr-reader');
-        setStatus('Solicitando permiso de cámara…');
-
-        await qrScanner.start(
-          { facingMode: 'environment' },
-          {
-            fps: 10,
-            qrbox: (viewfinderWidth, viewfinderHeight) => {
-              const shortestSide = Math.min(viewfinderWidth, viewfinderHeight);
-              const boxSize = Math.max(150, Math.min(280, Math.floor(shortestSide * 0.7)));
-              return { width: boxSize, height: boxSize };
-            },
-            aspectRatio: 1.0
+    try {
+      qrScanner = new window.Html5Qrcode('qr-reader');
+      await qrScanner.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: (w, h) => {
+            const side = Math.min(w, h);
+            const size = Math.max(150, Math.min(280, Math.floor(side * 0.7)));
+            return { width: size, height: size };
           },
-          async (decodedText) => {
-            if (scanHandled) return;
-            scanHandled = true;
-
-            const wasInserted = putQrIntoCaballon(decodedText);
-            const cleanValue = String(decodedText || '').trim();
-            setStatus(wasInserted
-              ? `QR leído correctamente. Caballón / lote: ${cleanValue}`
-              : `QR leído: ${cleanValue}. No se encontró el campo Caballón / lote.`);
-
-            // Detener la cámara tras una lectura correcta, sin ocultar el resultado.
-            await stopScanner(false);
-          },
-          () => {
-            // Los errores de cada fotograma son normales mientras se busca un QR.
-          }
-        );
-
-        setStatus('Cámara activa. Apunte al código QR y manténgalo dentro del recuadro.');
-      } catch (error) {
-        const detail = error && error.message ? error.message : String(error || 'Error desconocido');
-        setStatus(`No se pudo iniciar la cámara o el lector QR: ${detail}. Revise los permisos y que otra aplicación no esté usando la cámara.`);
-        await stopScanner(false);
-      } finally {
-        scannerStarting = false;
+          aspectRatio: 1.0
+        },
+        async (decodedText) => {
+          if (scanHandled) return;
+          scanHandled = true;
+          const value = String(decodedText || '').trim();
+          const inserted = insertQr(value);
+          setStatus(inserted ? `QR leído. Caballón / lote: ${value}` : `QR leído (${value}), pero no se encontró el campo Caballón / lote.`);
+          await stopScanner(false);
+        },
+        () => { /* No detectar un QR en un fotograma es normal. */ }
+      );
+      setStatus('Cámara activa. Apunte al QR; al leerlo se llenará Caballón / lote.');
+    } catch (error) {
+      const detail = error && error.message ? error.message : String(error || 'Error desconocido');
+      const normalized = detail.toLowerCase();
+      if (normalized.includes('notfound') || normalized.includes('requested device not found')) {
+        setStatus('No se encontró una cámara en este dispositivo. Pruebe desde el teléfono o conecte una cámara.');
+      } else {
+        setStatus(`No se pudo iniciar cámara/QR: ${detail}. Revise el permiso de cámara o pulse Reintentar.`);
       }
-    });
+      await stopScanner(false);
+    } finally {
+      scannerStarting = false;
+    }
+  }
 
-    stopButton.addEventListener('click', async () => {
+  document.addEventListener('DOMContentLoaded', () => {
+    const retry = $('qr-btn');
+    const close = $('stop-camera');
+    if (retry) retry.addEventListener('click', () => { void startScanner('manual'); });
+    if (close) close.addEventListener('click', async () => {
       await stopScanner(true);
-      setStatus('Cámara cerrada.');
+      setStatus('Cámara cerrada. Puede volver a abrirla con Reintentar cámara / QR.');
     });
-
-    window.addEventListener('pagehide', () => {
-      void stopScanner(true);
-    });
+    // Intento automático como solicita la aplicación original. El navegador todavía puede requerir permiso.
+    window.addEventListener('load', () => {
+      window.setTimeout(() => { void startScanner('automatic'); }, 500);
+    }, { once: true });
+    window.addEventListener('pagehide', () => { void stopScanner(true); });
   });
+  window.FincaCamera = { start: () => startScanner('manual'), stop: () => stopScanner(true), status: () => lastStatus };
 })();
