@@ -308,56 +308,96 @@
       const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!Recognition) { reject(new Error('El reconocimiento de voz del navegador no está disponible.')); return; }
       const rec = new Recognition();
-      rec.lang = 'es-CO'; rec.continuous = false; rec.interimResults = false; rec.maxAlternatives = 5;
-      let done = false, gotText = false;
-      const timer = setTimeout(() => finish(new Error('No se escuchó una respuesta.')), timeoutMs);
+      rec.lang = 'es-CO'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 5;
+      let done = false, gotText = false, latestInterim = '';
+      let silenceTimer = null;
+      const timer = setTimeout(() => {
+        // No extender silenciosamente la escucha indefinidamente: los 30 s son el
+        // máximo para que el trabajador empiece a responder, no un retraso intencional.
+        if (latestInterim) finish(null, latestInterim);
+        else finish(new Error('No se escuchó una respuesta.'));
+      }, timeoutMs);
       function finish(err, text) {
-        if (done) return; done = true; clearTimeout(timer);
+        if (done) return;
+        done = true; clearTimeout(timer); if (silenceTimer) clearTimeout(silenceTimer);
         try { rec.abort(); } catch (_) {}
         if (err) reject(err); else resolve(text);
       }
+      function choose(candidates) {
+        const valid = candidates.map(value => String(value || '').trim()).filter(Boolean);
+        if (!valid.length) return '';
+        if (typeof acceptCandidate === 'function') {
+          try { return valid.find(candidate => acceptCandidate(candidate)) || valid[0]; } catch (_) {}
+        }
+        return valid[0];
+      }
+      function scheduleInterim(text) {
+        if (!text) return;
+        latestInterim = text;
+        gotText = true;
+        if (silenceTimer) clearTimeout(silenceTimer);
+        // Chrome puede entregar texto provisional y tardar demasiado en marcarlo
+        // como final. Si deja de cambiar durante 1.4 s, entregamos lo reconocido.
+        silenceTimer = setTimeout(() => finish(null, latestInterim), 1400);
+      }
       rec.onstart = () => status('Escuchando con el servicio del navegador…');
       rec.onresult = event => {
-        const result = event.results && event.results[event.results.length - 1];
-        if (!result || !result.isFinal) return;
-        const candidates = Array.from(result).map(item => String(item.transcript || '').trim()).filter(Boolean);
+        const results = event.results;
+        if (!results || !results.length) return;
+        const last = results[results.length - 1];
+        const candidates = Array.from(last).map(item => String(item.transcript || '').trim()).filter(Boolean);
         if (!candidates.length) return;
-        gotText = true;
-        let chosen = candidates[0];
-        if (typeof acceptCandidate === 'function') {
-          try { chosen = candidates.find(candidate => acceptCandidate(candidate)) || candidates[0]; } catch (_) {}
+        const chosen = choose(candidates);
+        if (last.isFinal) {
+          gotText = true;
+          finish(null, chosen || latestInterim);
+        } else {
+          scheduleInterim(chosen);
         }
-        finish(null, chosen);
       };
       rec.onerror = event => {
         const err = event && event.error;
+        // Algunos Chrome lanzan no-speech/error al cerrar la sesión aunque haya
+        // llegado una transcripción provisional útil.
+        if (latestInterim && (err === 'no-speech' || err === 'aborted')) { finish(null, latestInterim); return; }
         if (err === 'not-allowed' || err === 'service-not-allowed') finish(new Error('El micrófono está bloqueado. Permita su uso para este sitio.'));
         else if (err === 'audio-capture') finish(new Error('No se encontró un micrófono disponible.'));
         else if (err === 'network') finish(new Error('El reconocimiento del navegador necesita internet. El motor local todavía no está listo.'));
         else if (err === 'no-speech') finish(new Error('No se escuchó una respuesta.'));
         else finish(new Error('No se pudo reconocer la voz (' + (err || 'error') + ').'));
       };
-      rec.onend = () => { if (!gotText) finish(new Error('No se escuchó una respuesta.')); };
+      rec.onend = () => {
+        if (latestInterim) finish(null, latestInterim);
+        else if (!gotText) finish(new Error('No se escuchó una respuesta.'));
+      };
       try { rec.start(); } catch (_) { finish(new Error('No se pudo iniciar el micrófono.')); }
     });
   }
 
   async function listen(timeoutMs = 25000, acceptCandidate = null) {
-    // Una vez instalado el motor local, usarlo tanto con internet como en modo avión
-    // mantiene el mismo comportamiento y evita depender del servicio de Google.
-    if (offlineModel || window.Vosk) {
+    // IMPORTANTE: conectado a internet, conservar el reconocimiento del navegador,
+    // que responde como en la versión que ya funcionaba. Vosk solo toma el turno
+    // cuando no hay conexión o si el navegador no ofrece reconocimiento de voz.
+    const BrowserRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (navigator.onLine && BrowserRecognition) {
       try {
-        if (!offlineModel) await prepareOffline();
-        return await listenLocal(timeoutMs);
+        return await listenBrowser(timeoutMs, acceptCandidate);
       } catch (error) {
-        // No se permite volver al reconocimiento online si el teléfono está desconectado.
-        if (!navigator.onLine) throw error;
-        console.warn('Vosk local no estuvo disponible; se usa reconocimiento del navegador esta vez:', error);
-        return listenBrowser(timeoutMs, acceptCandidate);
+        // Los fallos de permisos/micrófono no se arreglan cambiando de motor.
+        const message = String(error && error.message || error || '');
+        if (/micrófono está bloqueado|no se encontró un micrófono|no se pudo iniciar el micrófono|no ofrece acceso al micrófono/i.test(message)) throw error;
+        if (!offlineModel) throw error;
+        console.warn('Falló el reconocimiento conectado; se probará Vosk local:', error);
+        return listenLocal(timeoutMs);
       }
     }
+
+    if (offlineModel || window.Vosk) {
+      if (!offlineModel) await prepareOffline();
+      return listenLocal(timeoutMs);
+    }
     if (!navigator.onLine) throw new Error('El reconocimiento local no está preparado. Conéctese una vez y espere a que la voz sin conexión quede lista.');
-    return listenBrowser(timeoutMs, acceptCandidate);
+    throw new Error('Este navegador no ofrece reconocimiento de voz conectado y el motor local no está listo.');
   }
 
   function normalize(s) {
