@@ -460,6 +460,8 @@
   // Si el reconocimiento automático es bloqueado por el navegador, cualquier toque de pantalla
   // posterior sirve de gesto de autorización; no se muestra un botón adicional.
   document.addEventListener('pointerdown',()=>{
+    // Desbloquear la síntesis de voz dentro del gesto real del usuario; no añade botones.
+    if (window.FincaVoice && typeof FincaVoice.unlockAudio === 'function') FincaVoice.unlockAudio();
     if (autoVoicePending && !interviewRunning && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
   },true);
   void locate();

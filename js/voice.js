@@ -3,6 +3,8 @@
   'use strict';
   const $ = id => document.getElementById(id);
   let welcomePlayed = false;
+  let audioUnlocked = false;
+  let firstVoiceListCheck = false;
   const greetings = [
     'Gracias por su trabajo.',
     'Su labor es importante.',
@@ -21,23 +23,91 @@
   }
   function supportsRecognition() { return !!((window.Vosk && typeof window.Vosk.createModel === 'function') || window.SpeechRecognition || window.webkitSpeechRecognition); }
   function supportsSpeechOutput() { return ('speechSynthesis' in window) && typeof SpeechSynthesisUtterance === 'function'; }
+  const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  // Android/Chromium can drop the first utterance if speak() is called immediately
+  // after cancel(), or when the page has not received any user gesture. This silent
+  // unlock is called synchronously from the first touch; it adds no visible button.
+  function unlockAudio() {
+    if (audioUnlocked || !supportsSpeechOutput()) return audioUnlocked;
+    try {
+      const synth = window.speechSynthesis;
+      synth.getVoices();
+      const unlock = new SpeechSynthesisUtterance(' ');
+      unlock.lang = 'es-CO'; unlock.volume = 0; unlock.rate = 1;
+      unlock.onstart = () => { audioUnlocked = true; };
+      unlock.onend = () => { audioUnlocked = true; };
+      unlock.onerror = () => {};
+      synth.speak(unlock);
+      audioUnlocked = true;
+      return true;
+    } catch (error) {
+      console.warn('No se pudo desbloquear la salida de voz:', error);
+      return false;
+    }
+  }
+
+  async function loadAvailableVoices() {
+    if (!supportsSpeechOutput()) return [];
+    let voices = window.speechSynthesis.getVoices() || [];
+    if (voices.length || firstVoiceListCheck) return voices;
+    firstVoiceListCheck = true;
+    await new Promise(resolve => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        try { window.speechSynthesis.removeEventListener('voiceschanged', finish); } catch (_) {}
+        resolve();
+      };
+      try { window.speechSynthesis.addEventListener('voiceschanged', finish); } catch (_) {}
+      setTimeout(finish, 900);
+    });
+    voices = window.speechSynthesis.getVoices() || [];
+    return voices;
+  }
+
   function say(text, opts = {}) {
     return new Promise(resolve => {
       if (!supportsSpeechOutput()) { status('Este navegador no ofrece salida de voz.'); resolve(false); return; }
       let settled = false;
       let watchdog = null;
+      const phrase = String(text || '').trim();
       const finish = ok => { if (settled) return; settled = true; if (watchdog) clearTimeout(watchdog); resolve(ok); };
-      try {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(String(text || '').trim());
-        utterance.lang = 'es-CO'; utterance.rate = 0.92; utterance.pitch = 1; utterance.volume = 1;
-        const voice = getVoice(); if (voice) utterance.voice = voice;
-        utterance.onstart = () => { if (opts.onStart) opts.onStart(); };
-        utterance.onend = () => finish(true);
-        utterance.onerror = e => { if (!opts.silentError) status('No se pudo reproducir el audio (' + ((e && e.error) || 'error') + ').'); finish(false); };
-        window.speechSynthesis.speak(utterance);
-        watchdog = setTimeout(() => finish(false), Math.min(10000, Math.max(3000, String(text).length * 90 + 1700)));
-      } catch (_) { finish(false); }
+      if (!phrase) { finish(true); return; }
+      (async () => {
+        try {
+          const synth = window.speechSynthesis;
+          // Get the voice list early; some Android builds populate it asynchronously.
+          const voices = await loadAvailableVoices();
+          // Cancel only if there is an old utterance, then pause briefly. A zero-delay
+          // speak immediately after cancel is unreliable on Chrome for Android.
+          if (synth.speaking || synth.pending) {
+            synth.cancel();
+            await wait(140);
+          }
+          try { synth.resume(); } catch (_) {}
+          const utterance = new SpeechSynthesisUtterance(phrase);
+          utterance.lang = 'es-CO'; utterance.rate = 0.90; utterance.pitch = 1; utterance.volume = 1;
+          const spanish = voices.find(v => /^es-CO$/i.test(v.lang)) || voices.find(v => /^es(-|$)/i.test(v.lang));
+          if (spanish) { utterance.voice = spanish; utterance.lang = spanish.lang || 'es-CO'; }
+          utterance.onstart = () => { audioUnlocked = true; if (opts.onStart) opts.onStart(); };
+          utterance.onend = () => finish(true);
+          utterance.onerror = event => {
+            const reason = event && event.error ? event.error : 'error';
+            if (!opts.silentError) status('No se pudo reproducir el audio (' + reason + '). Toque una vez la pantalla y vuelva a intentar.');
+            finish(false);
+          };
+          watchdog = setTimeout(() => finish(false), Math.min(16000, Math.max(5000, phrase.length * 145 + 3000)));
+          // An extra scheduling turn after cancel avoids dropped utterances on Android.
+          await wait(80);
+          synth.speak(utterance);
+        } catch (error) {
+          console.error('Error del sintetizador de voz:', error);
+          if (!opts.silentError) status('No se pudo reproducir el audio. Revise el sonido y los permisos del teléfono.');
+          finish(false);
+        }
+      })();
     });
   }
   // acceptCandidate permite seleccionar una alternativa de reconocimiento que coincida
@@ -45,20 +115,20 @@
   // Reconocimiento local Vosk. El modelo comprimido se conserva en Cache Storage para
   // que una apertura posterior en modo avión no necesite descargarlo otra vez.
   const VOSK_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js';
-  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v1';
+  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v2';
   const VOICE_MODEL_KEY = new URL('./models/vosk-model-small-es-0.42.tar.gz', location.href).href;
   const VOICE_MODEL_PARTS = [
     './vosk-model-small-es-0.42.part01',
     './vosk-model-small-es-0.42.part02'
   ];
-  const VOICE_MODEL_BYTES = 39816269;
+  const VOICE_MODEL_BYTES = 39817091;
   let offlineModel = null;
   let offlineModelPromise = null;
   let archiveObjectUrl = null;
   let activeLocalSession = null;
 
   async function readResponseBytes(response, index, downloadedBefore) {
-    const expected = index === 0 ? 20000000 : 19816269;
+    const expected = index === 0 ? 20000000 : 19817091;
     const headerTotal = Number(response.headers.get('content-length')) || expected;
     if (!response.body || !response.body.getReader) {
       const buffer = await response.arrayBuffer();
@@ -351,5 +421,5 @@
     if (/\b(si|claro|correcto|afirmativo|utilice|use|listo|guardar|guarde|de acuerdo)\b/.test(s)) return true;
     return null;
   }
-  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, supportsRecognition, supportsSpeechOutput, prepareOffline, isOfflineReady: () => !!offlineModel };
+  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, unlockAudio, supportsRecognition, supportsSpeechOutput, prepareOffline, isOfflineReady: () => !!offlineModel };
 })();
