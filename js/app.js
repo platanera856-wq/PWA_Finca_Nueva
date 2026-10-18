@@ -2,21 +2,25 @@
   'use strict';
   const $ = id => document.getElementById(id);
   const form = $('record-form');
-  const cacheKey = (window.FINCA_CONFIG && FINCA_CONFIG.catalogStorageKey) || 'finca-catalogos-cache-v3';
+  const cacheKey = (window.FINCA_CONFIG && FINCA_CONFIG.catalogStorageKey) || 'finca-catalogos-cache-v4';
   let catalog = { empleados: [], labores: [], insumos: [], caballones: [] };
   let gps = { latitud: null, longitud: null, ok: false };
-  let interviewRunning = false;
   let catalogReady = false;
-  let lastFocusedField = null;
-  // Progreso dentro de una entrevista interrumpida: evita repetir pasos que ya quedaron completos.
+  let interviewRunning = false;
+  let autoVoicePending = false;
+  let qrAlreadyLaunched = '';
+  let cameraRestartPending = false;
   let voiceProgress = { insumosDone: false, observationsDone: false };
 
   function showNotice(text, kind = 'info') {
-    const el = $('app-notice'); if (!el) return;
-    el.textContent = text; el.className = 'notice ' + kind;
+    const el = $('app-notice');
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'notice ' + kind;
+    el.hidden = !text;
   }
-  function setCatalogStatus(text) { $('catalog-status').textContent = text; }
-  function normalize(s) { return FincaVoice.normalize(s); }
+  function setCatalogStatus(_) { /* Los catálogos se cargan en silencio; solo se muestran errores. */ }
+  function normalize(text) { return FincaVoice.normalize(text); }
   function todayLocal() {
     const d = new Date(); const p = n => String(n).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
@@ -25,14 +29,17 @@
     try {
       const raw = localStorage.getItem(cacheKey);
       if (!raw) return null;
-      const parsed = JSON.parse(raw);
-      if (!parsed || !Array.isArray(parsed.empleados) || !Array.isArray(parsed.labores) || !Array.isArray(parsed.insumos) || !Array.isArray(parsed.caballones)) return null;
-      return parsed;
+      const obj = JSON.parse(raw);
+      if (!obj || !['empleados','labores','insumos','caballones'].every(k => Array.isArray(obj[k]))) return null;
+      return obj;
     } catch (_) { return null; }
   }
   function normalizeCatalogData(data) {
     if (!data || data.exito !== true) throw new Error((data && data.mensaje) || 'Apps Script no devolvió los catálogos.');
     for (const key of ['empleados','labores','insumos','caballones']) if (!Array.isArray(data[key])) data[key] = [];
+    if (!data.empleados.length || !data.labores.length || !data.insumos.length || !data.caballones.length) {
+      throw new Error('Apps Script devolvió un catálogo vacío. Compruebe las hojas de la finca.');
+    }
     return { empleados:data.empleados, labores:data.labores, insumos:data.insumos, caballones:data.caballones, cachedAt:new Date().toISOString() };
   }
   function fillSelect(select, items, placeholder, selectedValue = '') {
@@ -40,185 +47,230 @@
     const initial = document.createElement('option'); initial.value = ''; initial.textContent = placeholder; select.appendChild(initial);
     for (const item of items) {
       if (!item || !item.id || !item.nombre) continue;
-      const o = document.createElement('option'); o.value = String(item.id).trim(); o.textContent = String(item.nombre).trim();
-      if (selectedValue && o.value === selectedValue) o.selected = true;
-      select.appendChild(o);
+      const option = document.createElement('option'); option.value = String(item.id).trim(); option.textContent = String(item.nombre).trim();
+      if (selectedValue && option.value === String(selectedValue)) option.selected = true;
+      select.appendChild(option);
     }
-    select.disabled = items.length === 0;
+    select.disabled = select.options.length <= 1;
   }
   function renderSelects() {
-    fillSelect($('empleado'), catalog.empleados, '-- Seleccione trabajador --');
-    fillSelect($('labor'), catalog.labores, '-- Seleccione labor --');
-    $('save-btn').disabled = false;
+    const oldEmployee = $('empleado').value;
+    const oldLabor = $('labor').value;
+    fillSelect($('empleado'), catalog.empleados, '-- Seleccione trabajador --', oldEmployee);
+    fillSelect($('labor'), catalog.labores, '-- Seleccione labor --', oldLabor);
     renderInsumoStockText();
-    // Si el QR se leyó antes de terminar la descarga, validarlo ahora que ya existe el catálogo.
     if ($('caballon').value.trim()) onQrChange();
+    updateSaveButton();
   }
   function renderInsumoStockText() {
     document.querySelectorAll('.insumo-row').forEach(row => {
-      const select = row.querySelector('.insumo-select'); const qty = row.querySelector('.insumo-qty'); const stockEl = row.querySelector('.insumo-stock');
-      const ins = catalog.insumos.find(x => String(x.id) === select.value);
-      if (!ins) { stockEl.textContent = 'Seleccione un insumo para ver su existencia.'; return; }
-      const available = Number(ins.disponible) || 0;
-      stockEl.textContent = `Disponible: ${available} ${ins.unidad || ''}`.trim();
+      const select = row.querySelector('.insumo-select');
+      const qty = row.querySelector('.insumo-qty');
+      const stockEl = row.querySelector('.insumo-stock');
+      const item = catalog.insumos.find(x => String(x.id) === select.value);
+      if (!item) { stockEl.textContent = 'Seleccione un insumo.'; stockEl.classList.remove('stock-error'); return; }
+      const available = Number(item.disponible) || 0;
+      stockEl.textContent = `Disponible: ${available} ${item.unidad || ''}`.trim();
       const over = qty.value !== '' && Number(qty.value) > available;
       stockEl.classList.toggle('stock-error', over);
-      if (over) stockEl.textContent += ' — cantidad superior a la existencia';
+      if (over) stockEl.textContent += ' — supera la existencia';
     });
   }
   function addInsumoRow(preselectId = '') {
     const row = document.createElement('div'); row.className = 'insumo-row'; row.dataset.insumoRow = 'true';
     const labelSelect = document.createElement('label'); labelSelect.textContent = 'Insumo';
-    const select = document.createElement('select'); select.className = 'insumo-select'; select.required = false;
+    const select = document.createElement('select'); select.className = 'insumo-select';
     fillSelect(select, catalog.insumos, '-- Seleccione insumo --', preselectId); labelSelect.appendChild(select);
     const labelQty = document.createElement('label'); labelQty.textContent = 'Cantidad utilizada';
-    const qty = document.createElement('input'); qty.type = 'number'; qty.className = 'insumo-qty'; qty.min = '0.001'; qty.step = 'any'; qty.inputMode = 'decimal'; qty.placeholder = 'Cantidad'; labelQty.appendChild(qty);
-    const stock = document.createElement('p'); stock.className = 'insumo-stock'; stock.textContent = 'Seleccione un insumo para ver su existencia.';
-    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'secondary danger'; remove.textContent = 'Quitar insumo'; remove.addEventListener('click', () => row.remove());
-    select.addEventListener('change', renderInsumoStockText); qty.addEventListener('input', renderInsumoStockText);
-    row.append(labelSelect, labelQty, stock, remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
+    const qty = document.createElement('input'); qty.type='number'; qty.className='insumo-qty'; qty.min='0.001'; qty.step='any'; qty.inputMode='decimal'; qty.placeholder='Cantidad'; labelQty.appendChild(qty);
+    const stock = document.createElement('p'); stock.className='insumo-stock'; stock.textContent='Seleccione un insumo.';
+    const remove = document.createElement('button'); remove.type='button'; remove.className='secondary danger'; remove.textContent='Quitar insumo'; remove.addEventListener('click',()=>{row.remove();updateSaveButton();});
+    select.addEventListener('change',()=>{renderInsumoStockText();updateSaveButton();});
+    qty.addEventListener('input',()=>{renderInsumoStockText();updateSaveButton();});
+    row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
-  // Validación estricta: solo acepta un nombre o ID que exista en el catálogo descargado.
-  // Si el dictado cambia una letra, se vuelve a preguntar; nunca se asigna la coincidencia más cercana.
-  function byVoiceMatch(text, items) {
-    const query = normalize(text);
-    if (!query) return null;
-    return items.find(item => normalize(item.nombre) === query || normalize(item.id) === query) || null;
+
+  // La pronunciación puede variar, pero solo se acepta una opción real y no ambigua del catálogo.
+  function canonicalSpeech(text) {
+    let s = normalize(text);
+    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj)\b/g,'deshoje');
+    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g,'kcl');
+    s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
+    return s;
+  }
+  const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor']);
+  function meaningfulTokens(text) { return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t)); }
+  function matchCatalogVoice(text, items, type) {
+    const query = canonicalSpeech(text);
+    if (!query || !items || !items.length) return null;
+    const exact = items.filter(item => canonicalSpeech(item.nombre) === query || canonicalSpeech(item.id) === query);
+    if (exact.length === 1) return exact[0];
+    const queryTokens = new Set(meaningfulTokens(query));
+    // Primer nombre, como en la interfaz original; si hay homónimos, exige otra palabra.
+    if (type === 'trabajador') {
+      const firstNameMatches = items.filter(item => {
+        const words = canonicalSpeech(item.nombre).split(/\s+/).filter(Boolean);
+        return words.length && queryTokens.has(words[0]) && words[0].length > 2;
+      });
+      if (firstNameMatches.length === 1) return firstNameMatches[0];
+      if (firstNameMatches.length > 1) {
+        const ranked = firstNameMatches.map(item => ({item, score: meaningfulTokens(item.nombre).filter(t => queryTokens.has(t)).length})).sort((a,b)=>b.score-a.score);
+        if (ranked.length && ranked[0].score > ranked[1].score) return ranked[0].item;
+      }
+    }
+    // Tokens exclusivos pesan más que palabras repetidas como «control», «cuido» o «alim».
+    const termFrequency = {};
+    for (const item of items) for (const term of new Set(meaningfulTokens(item.nombre))) termFrequency[term]=(termFrequency[term]||0)+1;
+    const ranked = [];
+    for (const item of items) {
+      let itemTokens = meaningfulTokens(item.nombre);
+      if (type === 'labor' && /deshoj|deshoje|desoj/.test(canonicalSpeech(text))) itemTokens = itemTokens.map(t => /deshoj|desoj/.test(t) ? 'deshoje' : t);
+      const hit = itemTokens.filter(t => queryTokens.has(t));
+      if (!hit.length) continue;
+      let score = 0;
+      for (const term of new Set(hit)) score += termFrequency[term] === 1 ? 10 : 1;
+      if (itemTokens.length > 0 && itemTokens.every(t => queryTokens.has(t))) score += 20;
+      ranked.push({item,score});
+    }
+    ranked.sort((a,b)=>b.score-a.score);
+    if (!ranked.length || ranked[0].score < 10) return null;
+    if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
+    return ranked[0].item;
+  }
+  function matchCaballon(code) {
+    const c = normalize(code).replace(/\s+/g,'');
+    return catalog.caballones.find(x => normalize(x.codigoQR).replace(/\s+/g,'') === c) || null;
   }
   async function loadCatalogs() {
-    setCatalogStatus('Conectando con Apps Script para cargar trabajadores, labores, insumos y caballones…');
     try {
-      if (!navigator.onLine) throw new Error('El teléfono está sin internet.');
+      if (!navigator.onLine) throw new Error('Sin internet.');
       const live = await FincaAPI.call('obtenerDatosFormulario', null, 40000);
       catalog = normalizeCatalogData(live);
       localStorage.setItem(cacheKey, JSON.stringify(catalog));
       catalogReady = true;
-      setCatalogStatus(`✅ Catálogos cargados desde Apps Script: ${catalog.empleados.length} trabajadores, ${catalog.labores.length} labores, ${catalog.insumos.length} insumos y ${catalog.caballones.length} caballones.`);
-      showNotice('Los catálogos se descargaron de Google Apps Script y quedaron guardados para uso posterior.', 'success');
     } catch (err) {
       const cache = safeParseCache();
-      if (cache) {
-        catalog = cache; catalogReady = true;
-        setCatalogStatus(`📴 Sin conexión con Apps Script. Se usan los catálogos guardados localmente (copia: ${cache.cachedAt ? new Date(cache.cachedAt).toLocaleString() : 'fecha desconocida'}).`);
-        showNotice('Sin internet: se están usando las listas guardadas previamente en este teléfono.', 'info');
-      } else {
-        catalogReady = false;
-        setCatalogStatus('❌ No se pudieron cargar los catálogos y no hay copia local. Abra la aplicación con internet para preparar las listas.');
-        showNotice('Error al cargar los catálogos: ' + err.message, 'error');
-      }
+      if (cache) { catalog = cache; catalogReady = true; }
+      else { catalogReady = false; showNotice('No se pudieron cargar las listas de la finca. Conéctese a internet y vuelva a abrir la aplicación.', 'error'); }
     }
     renderSelects();
-    updateSaveButton();
+    if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview();
   }
-  function matchCaballon(code) { const c = normalize(code).replace(/\s+/g,''); return catalog.caballones.find(x => normalize(x.codigoQR).replace(/\s+/g,'') === c) || null; }
   function onQrChange() {
-    const code = $('caballon').value.trim(); const info = $('caballon-detail');
-    if (!code) { info.textContent = 'La cámara intenta abrirse al entrar; si el navegador lo bloquea, pulse «Reintentar cámara / QR».'; updateSaveButton(); return; }
+    const code = $('caballon').value.trim();
+    const info = $('caballon-detail');
+    if (!code) { if (info) info.textContent=''; updateSaveButton(); return; }
+    if (!catalogReady) { if (info) info.textContent=''; return; }
     const found = matchCaballon(code);
     if (found) {
-      info.textContent = `✅ ${found.nombre || 'Caballón'} · Lote ${found.lote || '—'} · Plantas registradas en catálogo: ${found.plantas ?? '—'}.`;
-      showNotice('QR reconocido y encontrado en el catálogo de la finca.', 'success');
-      // Las plantas del QR describen el caballón, no necesariamente las plantas trabajadas hoy.
-      // El campo de labor queda vacío para que el flujo lo pregunte y lo valide.
+      if (info) info.textContent = `${found.nombre || 'Caballón'} · Lote ${found.lote || '—'}`;
+      showNotice('Caballón identificado.', 'success');
+      updateSaveButton();
+      scheduleAutomaticInterview(code);
     } else {
-      info.textContent = `Se leyó el código ${code}, pero no aparece en el catálogo descargado. Revise el QR o actualice los catálogos.`;
-      showNotice('El código QR se leyó, pero no coincide con los caballones descargados. No se permitirá guardar hasta resolverlo.', 'error');
+      if (info) info.textContent = 'El QR no corresponde a un caballón del catálogo.';
+      showNotice('El QR no está registrado en la finca. No se permitirá guardar este registro.', 'error');
+      updateSaveButton();
     }
-    updateSaveButton();
+  }
+  function scheduleAutomaticInterview(code) {
+    if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
+    qrAlreadyLaunched = code;
+    autoVoicePending = true;
+    // Deja terminar el callback del lector QR antes de solicitar el micrófono.
+    window.setTimeout(() => { if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview(); }, 500);
   }
   function getSelectedName(id, list) { const item=list.find(x=>String(x.id)===String(id)); return item ? item.nombre : ''; }
-  function updateSaveButton() {
-    const qr = $('caballon').value.trim(); const qrValid = !!matchCaballon(qr);
-    const qtyBad = [...document.querySelectorAll('.insumo-row')].some(row => {
-      const id = row.querySelector('.insumo-select').value, q = row.querySelector('.insumo-qty').value;
-      if (!id && !q) return false;
-      const ins = catalog.insumos.find(x=>String(x.id)===id); return !ins || !q || Number(q)<=0 || Number(q)>(Number(ins.disponible)||0);
-    });
-    const employeeValid = catalog.empleados.some(x => String(x.id) === String($('empleado').value));
-    const laborValid = catalog.labores.some(x => String(x.id) === String($('labor').value));
-    $('save-btn').disabled = !catalogReady || !employeeValid || !laborValid || !qrValid || !$('horas').value || Number($('horas').value)<0.5 || Number($('horas').value)>8 || !$('matas').value || Number($('matas').value)<=0 || qtyBad;
-  }
+  function validEmployee() { return catalog.empleados.some(x=>String(x.id)===String($('empleado').value)); }
+  function validLabor() { return catalog.labores.some(x=>String(x.id)===String($('labor').value)); }
+  function validHours() { const n=Number($('horas').value); return $('horas').value!=='' && Number.isFinite(n) && n>=0.5 && n<=8; }
+  function validPlants() { const n=Number($('matas').value); return $('matas').value!=='' && Number.isInteger(n) && n>0; }
   function getInsumosPayload() {
-    const rows = [...document.querySelectorAll('.insumo-row')];
-    const items=[];
+    const rows=[...document.querySelectorAll('.insumo-row')], items=[], totals={};
     for (const row of rows) {
-      const id = row.querySelector('.insumo-select').value; const rawQty = row.querySelector('.insumo-qty').value;
-      if (!id && !rawQty) continue;
-      if (!id) throw new Error('Seleccione el nombre del insumo.');
-      if (!rawQty || !Number.isFinite(Number(rawQty)) || Number(rawQty)<=0) throw new Error('Ingrese una cantidad válida para cada insumo.');
-      const ins = catalog.insumos.find(x=>String(x.id)===id);
-      if (!ins) throw new Error('El insumo seleccionado no está en el catálogo.');
-      const available=Number(ins.disponible)||0;
-      if (Number(rawQty)>available) throw new Error(`Stock insuficiente de ${ins.nombre}. Disponible: ${available} ${ins.unidad || ''}. Corrija la cantidad; no se guardó el registro.`);
-      items.push({idInsumo:id,cantidad:Number(rawQty)});
+      const id=row.querySelector('.insumo-select').value, raw=row.querySelector('.insumo-qty').value;
+      if (!id && !raw) continue;
+      if (!id) throw new Error('Seleccione el insumo.');
+      if (!raw || !Number.isFinite(Number(raw)) || Number(raw)<=0) throw new Error('Ingrese la cantidad del insumo.');
+      const item=catalog.insumos.find(x=>String(x.id)===id);
+      if (!item) throw new Error('El insumo no pertenece al catálogo.');
+      totals[id]=(totals[id]||0)+Number(raw);
+      if (totals[id]>(Number(item.disponible)||0)) throw new Error(`Existencia insuficiente de ${item.nombre}. Solo hay ${Number(item.disponible)||0} ${item.unidad||''}.`);
+      items.push({idInsumo:id,cantidad:Number(raw)});
     }
     return items;
   }
+  function updateSaveButton() {
+    const qr=!!matchCaballon($('caballon').value.trim());
+    let stockValid=true;
+    try { getInsumosPayload(); } catch (_) { stockValid=false; }
+    const ready=catalogReady && validEmployee() && validLabor() && validHours() && validPlants() && qr && stockValid && !interviewRunning;
+    $('save-btn').disabled=!ready;
+  }
   function locate() {
     return new Promise(resolve => {
-      if (!navigator.geolocation) { gps={latitud:null,longitud:null,ok:false}; resolve(gps); return; }
+      if (!navigator.geolocation) { gps={latitud:null,longitud:null,ok:false}; $('sync-status').textContent='Este navegador no ofrece GPS.'; resolve(gps); return; }
       navigator.geolocation.getCurrentPosition(pos => {
         gps={latitud:pos.coords.latitude,longitud:pos.coords.longitude,ok:true};
-        $('sync-status').textContent = `Ubicación GPS capturada (precisión aproximada ${Math.round(pos.coords.accuracy)} m).`;
+        $('sync-status').textContent=`GPS listo (precisión aproximada ${Math.round(pos.coords.accuracy)} m).`;
         resolve(gps);
-      }, error => {
+      }, err => {
         gps={latitud:null,longitud:null,ok:false};
-        const msg=error.code===1?'Permiso de ubicación denegado. Permita la ubicación para este sitio.':error.code===2?'No se pudo determinar la ubicación GPS. Compruebe que la ubicación del teléfono esté activa.':'El GPS tardó demasiado. Intente de nuevo en un lugar abierto.';
-        $('sync-status').textContent=msg; resolve(gps);
+        $('sync-status').textContent=err.code===1?'Permita la ubicación para guardar el registro.':'No se pudo obtener GPS. Revise que la ubicación esté activada.';
+        resolve(gps);
       }, {enableHighAccuracy:true,timeout:20000,maximumAge:0});
     });
   }
-  async function saveRecord(event) {
-    event.preventDefault();
+  async function saveRecord(event, fromVoice = false) {
+    if (event && typeof event.preventDefault==='function') event.preventDefault();
     try {
-      updateSaveButton();
-      if (!catalogReady) throw new Error('No hay catálogos cargados. Conéctese a internet para preparar la aplicación.');
-      const qr=$('caballon').value.trim(); const cab=matchCaballon(qr);
-      if (!cab) throw new Error('El código QR debe coincidir con un caballón del catálogo.');
-      if (!catalog.empleados.some(x => String(x.id) === String($('empleado').value))) throw new Error('Seleccione un trabajador de la lista oficial de empleados. No se aceptan nombres escritos fuera del catálogo.');
-      if (!catalog.labores.some(x => String(x.id) === String($('labor').value))) throw new Error('Seleccione una labor de la lista oficial.');
-      const horas=Number($('horas').value), matas=Number($('matas').value);
-      if (!Number.isFinite(horas)||horas<0.5||horas>8) throw new Error('Las horas deben estar entre 0,5 y 8.');
-      if (!Number.isInteger(matas)||matas<=0) throw new Error('Las plantas trabajadas deben ser un entero mayor que cero.');
+      if (!catalogReady) throw new Error('Las listas de la finca no están disponibles.');
+      const qr=$('caballon').value.trim(), cab=matchCaballon(qr);
+      if (!cab) throw new Error('Escanee un QR válido de la finca.');
+      if (!validEmployee()) throw new Error('Seleccione un trabajador de la lista.');
+      if (!validLabor()) throw new Error('Seleccione una labor de la lista.');
+      if (!validHours()) throw new Error('Las horas deben estar entre 0,5 y 8.');
+      if (!validPlants()) throw new Error('Las plantas deben ser un número entero mayor que cero.');
       const insumos=getInsumosPayload();
-      const geo = gps.ok ? gps : await locate();
-      if (!geo.ok) throw new Error('No se guardó el registro: el GPS es obligatorio. ' + $('sync-status').textContent);
-      const uuid = crypto.randomUUID ? crypto.randomUUID() : ('finca-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      const geo=gps.ok ? gps : await locate();
+      if (!geo.ok) throw new Error('No se guardó. El GPS es obligatorio.');
+      const uuid=(window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('finca-'+Date.now()+'-'+Math.random().toString(36).slice(2));
       const record={
         id:uuid,idCliente:uuid,createdAt:new Date().toISOString(),syncStatus:'pending',
-        fecha:$('fecha').value, empleado:$('empleado').value, empleadoNombre:getSelectedName($('empleado').value,catalog.empleados),
-        labor:$('labor').value, laborNombre:getSelectedName($('labor').value,catalog.labores),
-        caballon:qr,caballonNombre:cab.nombre,lote:cab.lote,horas,matas,observaciones:$('observaciones').value.trim(),
-        insumos,latitud:geo.latitud,longitud:geo.longitud
+        fecha:$('fecha').value,empleado:$('empleado').value,empleadoNombre:getSelectedName($('empleado').value,catalog.empleados),
+        labor:$('labor').value,laborNombre:getSelectedName($('labor').value,catalog.labores),
+        caballon:qr,caballonNombre:cab.nombre,lote:cab.lote,horas:Number($('horas').value),matas:Number($('matas').value),
+        observaciones:$('observaciones').value.trim(),insumos,latitud:geo.latitud,longitud:geo.longitud
       };
       await FincaDB.save(record);
       await renderRecords();
-      showNotice('Registro guardado primero en este teléfono. Intentando enviarlo a Google Sheets…','info');
+      let finalMessage='Registro guardado en este teléfono.';
       if (navigator.onLine) {
-        try {
-          await FincaSync.sendRecord(record);
-          showNotice('✅ Registro recibido por Apps Script y sincronizado con Google Sheets.', 'success');
-          $('sync-status').textContent='Registro enviado. Verifique la fila correspondiente en Google Sheets.';
-        } catch (sendError) {
-          // Ya existe en IndexedDB; conservarlo pendiente evita volver a crearlo desde el formulario.
-          showNotice('El registro quedó guardado en este teléfono, pero no se confirmó el envío a Sheets. Se conserva pendiente para reintentar: ' + sendError.message, 'error');
-          $('sync-status').textContent='Registro local guardado; falta confirmar sincronización. Use «Sincronizar pendientes» cuando haya conexión estable.';
-        }
+        try { await FincaSync.sendRecord(record); finalMessage='Registro guardado y confirmado por Apps Script.'; $('sync-status').textContent='Envío confirmado por Apps Script. Verifique la fila en Google Sheets.'; }
+        catch (sendError) { finalMessage='Registro guardado en este teléfono; pendiente de sincronización.'; $('sync-status').textContent='Pendiente de sincronización: '+sendError.message; }
       } else {
-        showNotice('📴 Registro guardado en este teléfono. Se enviará cuando vuelva internet.', 'info');
+        finalMessage='Registro guardado en este teléfono; se enviará cuando vuelva internet.';
+        $('sync-status').textContent='Sin internet: el registro sigue guardado localmente.';
       }
+      showNotice(finalMessage, 'success');
       await renderRecords();
-      resetAfterSave();
+      resetAfterSave(fromVoice);
+      if (fromVoice) await FincaVoice.say('Registro guardado.');
+      return true;
     } catch (error) {
-      showNotice(error.message || String(error), 'error');
-      await FincaVoice.say(error.message || 'Revise los datos del formulario.', {silentError:true});
+      showNotice(error.message || 'No se pudo guardar el registro.', 'error');
+      if (fromVoice) await FincaVoice.say(error.message || 'No se pudo guardar.');
+      return false;
     } finally { updateSaveButton(); }
   }
-  function resetAfterSave() {
+  function resetAfterSave(fromVoice = false) {
     $('empleado').value=''; $('labor').value=''; $('horas').value=''; $('matas').value=''; $('observaciones').value='';
-    $('insumos-container').replaceChildren(); $('fecha').value=todayLocal();
-    voiceProgress = { insumosDone: false, observationsDone: false };
-    // Se conserva el QR para facilitar múltiples registros en el mismo caballón.
+    $('insumos-container').replaceChildren(); $('fecha').value=todayLocal(); $('caballon').value='';
+    $('caballon-detail').textContent=''; voiceProgress={insumosDone:false,observationsDone:false};
+    qrAlreadyLaunched=''; autoVoicePending=false;
+    if (fromVoice) cameraRestartPending=true;
+    else if (window.FincaCamera) window.setTimeout(()=>void window.FincaCamera.start(),500);
+    updateSaveButton();
   }
   async function renderRecords() {
     try {
@@ -236,219 +288,172 @@
       }
     } catch(e) { $('records').textContent='No se pudieron leer los registros locales: '+e.message; }
   }
-  function validEmployeeSelection() { return catalog.empleados.some(x => String(x.id) === String($('empleado').value)); }
-  function validLaborSelection() { return catalog.labores.some(x => String(x.id) === String($('labor').value)); }
-  function validHoursValue() { const n=Number($('horas').value); return $('horas').value!=='' && Number.isFinite(n) && n>=0.5 && n<=8; }
-  function validPlantsValue() { const n=Number($('matas').value); return $('matas').value!=='' && Number.isInteger(n) && n>0; }
 
-  async function startVoiceInterview() {
-    if(interviewRunning) return;
-    if(!catalogReady) { showNotice('Espere a que carguen los catálogos antes de iniciar la entrevista.','error'); await FincaVoice.say('Espere un momento. Todavía estoy cargando las listas de trabajadores, labores e insumos.'); return; }
-    if(!FincaVoice.supportsRecognition()) { const msg='Este navegador no ofrece reconocimiento de voz. Pruebe Chrome actualizado en Android y compruebe que el teléfono tenga activado el servicio de reconocimiento de voz en español.'; showNotice(msg,'error'); FincaVoice.status(msg); await FincaVoice.say(msg); return; }
-    interviewRunning=true; const button=$('voice-btn');button.disabled=true;button.textContent='🎙 Entrevista en curso…';
-    try {
-      // La pulsación del usuario desbloquea audio/micrófono en los navegadores móviles.
-      const greeted=await FincaVoice.welcome();
-      if(!greeted) await FincaVoice.say('Vamos a registrar una labor. Escuche cada pregunta y responda cuando termine de hablar.');
-      if(!matchCaballon($('caballon').value)) {
-        await FincaVoice.say('Primero escanearemos el código QR del caballón. La cámara está al inicio de la pantalla.');
-        $('qr-area').hidden=false;
-        if (window.FincaCamera) void window.FincaCamera.start();
-        const qrOk=await waitForQr(90000);
-        if(!qrOk) throw new Error('No se recibió un QR válido en 90 segundos. El registro no puede continuar sin un QR válido.');
-      }
-      if(!validEmployeeSelection()) await askCatalogChoice('¿Quién realizó la labor? Diga el nombre completo de un trabajador que aparezca en la lista.',catalog.empleados,$('empleado'),'trabajador');
-      if(!validLaborSelection()) await askCatalogChoice('¿Qué labor realizó? Diga el nombre de una labor que aparezca en la lista.',catalog.labores,$('labor'),'labor');
-      if(!validHoursValue()) await askNumeric('¿Cuántas horas trabajó? Diga un número entre cero coma cinco y ocho.',$('horas'),n=>n>=0.5&&n<=8,'Las horas deben ser entre cero coma cinco y ocho.');
-      if(!validPlantsValue()) await askNumeric('¿Cuántas plantas trabajó? Diga el número entero de plantas.',$('matas'),n=>Number.isInteger(n)&&n>0,'Diga un número entero de plantas mayor que cero.');
-      if(!voiceProgress.insumosDone) {
-        const manualInsumoComplete = [...document.querySelectorAll('.insumo-row')].some(row => {
-          const id=row.querySelector('.insumo-select').value, qty=row.querySelector('.insumo-qty').value;
-          const item=catalog.insumos.find(x=>String(x.id)===String(id));
-          return !!item && !!qty && Number(qty)>0 && Number(qty)<=Number(item.disponible);
-        });
-        if(manualInsumoComplete) voiceProgress.insumosDone=true;
-        else { await askInsumos(); voiceProgress.insumosDone=true; }
-      }
-      if(!voiceProgress.observationsDone) {
-        if($('observaciones').value.trim()) { voiceProgress.observationsDone=true; }
-        else {
-          const observation=await askText('¿Qué observaciones desea registrar? Dicte la observación o diga “sin observaciones”.');
-          $('observaciones').value=/\bsin observaciones\b/i.test(normalize(observation))?'':observation;
-          $('observaciones').dispatchEvent(new Event('input',{bubbles:true}));
-          voiceProgress.observationsDone=true;
-        }
-      }
-      await FincaVoice.say('Entrevista terminada. Revise los datos. Si todo está correcto, guarde el registro.');
-      showNotice('Entrevista por voz terminada. Revise los campos y pulse «Guardar registro».','success');
-      await locate();
-    } catch(error) {
-      showNotice(error.message || String(error),'error');
-      await FincaVoice.say(error.message || 'La entrevista se detuvo. Corrija el dato indicado y vuelva a continuar.',{silentError:true});
-    } finally { interviewRunning=false;button.disabled=false;button.textContent='🎙 Iniciar entrevista guiada';updateSaveButton(); }
-  }
-
-  async function askCatalogChoice(question, items, select, name) {
-    for(let attempt=1;attempt<=3;attempt++) {
-      await FincaVoice.say(question + (attempt>1 ? ` Intento ${attempt} de 3.` : ''));
+  function findVoiceMatch(text, items, kind) { return matchCatalogVoice(text,items,kind); }
+  function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono/i.test((error && error.message)||''); }
+  async function askCatalogChoice(question, items, select, kind) {
+    if (!items.length) throw new Error('La lista de '+kind+' está vacía.');
+    const shortPrompt = kind==='trabajador' ? 'No está en la lista. ¿Trabajador?' : kind==='labor' ? 'No la encontré. ¿Qué labor?' : 'No lo encontré. ¿Qué insumo?';
+    let attempts=0;
+    while (true) {
+      await FincaVoice.say(question, {silentError:true});
       try {
-        const answer=await FincaVoice.listen(30000); const item=byVoiceMatch(answer,items);
-        if(item) {
-          const allowed = Array.from(select.options).some(option => option.value === String(item.id));
-          if(!allowed) throw new Error('El dato no existe en las opciones cargadas.');
+        const answer=await FincaVoice.listen(30000, candidate=>!!findVoiceMatch(candidate,items,kind));
+        const item=findVoiceMatch(answer,items,kind);
+        if (item) {
           select.value=String(item.id);
-          if(select.value !== String(item.id)) throw new Error('No se pudo seleccionar un valor oficial del catálogo.');
-          select.dispatchEvent(new Event('change',{bubbles:true}));
-          updateSaveButton();
-          showNotice(`${name[0].toUpperCase()+name.slice(1)} validado en el catálogo: ${item.nombre}.`,'success');
-          await FincaVoice.say(`${item.nombre}. Confirmado en la lista.`);
+          if (select.value!==String(item.id)) throw new Error('No se pudo seleccionar el dato del catálogo.');
+          select.dispatchEvent(new Event('change',{bubbles:true})); updateSaveButton();
+          await FincaVoice.say(item.nombre, {silentError:true});
           return item;
         }
-        await FincaVoice.say('No aceptaré un nombre que no figure en la lista. Diga el nombre completo, tal como aparece en pantalla.');
-      } catch(e) { await FincaVoice.say((e.message||'No entendí la respuesta.') + ' Vamos a intentarlo otra vez.'); }
+        attempts++;
+        await FincaVoice.say(attempts%3===0 ? shortPrompt : 'No está en la lista. Intente otra vez.', {silentError:true});
+      } catch (error) {
+        if (isFatalVoiceError(error)) throw error;
+        attempts++;
+        await FincaVoice.say(attempts%3===0 ? shortPrompt : 'No escuché. Repitamos.', {silentError:true});
+      }
     }
-    throw new Error('El dato de ' + name + ' no coincidió con el catálogo después de tres intentos. No se aceptó ningún nombre inventado. Corrija la selección y vuelva a iniciar la entrevista; se continuará desde el primer campo pendiente.');
   }
-
-  async function askNumeric(question, field, validator, invalidText) {
-    for(let attempt=1;attempt<=3;attempt++) {
-      await FincaVoice.say(question + (attempt>1 ? ` Intento ${attempt} de 3.` : ''));
+  async function askNumber(question, field, validator, invalidPrompt, kind='number') {
+    let attempts=0;
+    while (true) {
+      await FincaVoice.say(question, {silentError:true});
       try {
-        const raw=await FincaVoice.listen(25000); const value=FincaVoice.parseNumber(raw);
-        if(value!==null && Number.isFinite(value) && validator(value)) {field.value=String(value);field.dispatchEvent(new Event('input',{bubbles:true}));return value;}
-        await FincaVoice.say(invalidText + ' Escuche la pregunta nuevamente.');
-      } catch(e) { await FincaVoice.say((e.message||'No entendí el número.') + ' Voy a repetir la pregunta.'); }
+        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);});
+        const value=FincaVoice.parseNumber(answer);
+        if (value!==null && Number.isFinite(value) && validator(value)) {
+          field.value=String(value); field.dispatchEvent(new Event('input',{bubbles:true})); field.dispatchEvent(new Event('change',{bubbles:true})); updateSaveButton(); return value;
+        }
+      } catch (error) { if (isFatalVoiceError(error)) throw error; }
+      attempts++;
+      await FincaVoice.say(attempts%3===0 ? invalidPrompt : 'No entendí el número. Otra vez.', {silentError:true});
     }
-    throw new Error('No se pudo registrar el número después de tres intentos. Corríjalo en pantalla.');
   }
   async function askText(question) {
-    for(let attempt=1;attempt<=3;attempt++) {
-      await FincaVoice.say(question + (attempt>1 ? ` Intento ${attempt} de 3.` : ''));
-      try { const answer=await FincaVoice.listen(25000); if(answer.trim()) return answer.trim(); }
-      catch(e) { await FincaVoice.say((e.message||'No entendí la observación.') + ' Puede intentarlo de nuevo.'); }
+    let attempts=0;
+    while (true) {
+      await FincaVoice.say(question,{silentError:true});
+      try {
+        const answer=await FincaVoice.listen(30000);
+        if (answer.trim()) return answer.trim();
+      } catch (error) { if (isFatalVoiceError(error)) throw error; }
+      attempts++;
+      await FincaVoice.say(attempts%3===0?'¿Observaciones? Diga ninguna si no hay.':'No escuché. Repita la observación.',{silentError:true});
     }
-    throw new Error('No se pudo registrar la observación después de tres intentos. Puede dictarla en el campo Observaciones y continuar.');
   }
   async function askYesNo(question) {
-    for(let attempt=1;attempt<=3;attempt++) {
-      await FincaVoice.say(question + (attempt>1 ? ` Intento ${attempt} de 3. Responda sí o no.` : ''));
-      try { const answer=await FincaVoice.listen(20000); const result=FincaVoice.yesNo(answer); if(result!==null)return result; }
-      catch(_) {}
-      await FincaVoice.say('No entendí. Responda sí o no.');
+    let attempts=0;
+    while (true) {
+      await FincaVoice.say(question,{silentError:true});
+      try {
+        const answer=await FincaVoice.listen(25000,candidate=>FincaVoice.yesNo(candidate)!==null);
+        const result=FincaVoice.yesNo(answer); if(result!==null) return result;
+      } catch (error) { if (isFatalVoiceError(error)) throw error; }
+      attempts++;
+      await FincaVoice.say(attempts%3===0?'Responda sí o no.':'No entendí. Sí o no.',{silentError:true});
     }
-    throw new Error('No se pudo entender la respuesta después de tres intentos.');
   }
   async function askInsumos() {
-    const use=await askYesNo('¿Utilizó algún insumo en esta labor? Diga sí o no.');
-    if(!use) return;
+    const use=await askYesNo('¿Usó insumos? Sí o no.');
+    if (!use) return;
+    const availableItems=catalog.insumos.filter(item=>Number(item.disponible)>0);
+    if (!availableItems.length) { await FincaVoice.say('No hay insumos disponibles.'); return; }
     let count=0;
-    while(count<5) {
-      const row=addInsumoRow(); const select=row.querySelector('.insumo-select'); const qty=row.querySelector('.insumo-qty');
-      const ins=await askCatalogChoice('¿Qué insumo utilizó? Diga el nombre que aparece en la lista.',catalog.insumos,select,'insumo');
-      let quantityAccepted=false;
-      for(let attempt=1;attempt<=3;attempt++) {
-        const available=Number(ins.disponible)||0;
-        await FincaVoice.say(`¿Qué cantidad de ${ins.nombre} utilizó? Hay ${available} ${ins.unidad||''} disponibles. Diga la cantidad.` + (attempt>1?` Intento ${attempt} de 3.`:''));
-        try {
-          const raw=await FincaVoice.listen(25000); const n=FincaVoice.parseNumber(raw);
-          if(n!==null && Number.isFinite(n) && n>0 && n<=available){qty.value=String(n);qty.dispatchEvent(new Event('input',{bubbles:true}));quantityAccepted=true;break;}
-          await FincaVoice.say(n!==null&&n>available?`La cantidad supera la existencia. Solo hay ${available} ${ins.unidad||''}. No se registró esa cantidad.`:'La cantidad debe ser un número mayor que cero.');
-        } catch(e) { await FincaVoice.say((e.message||'No entendí la cantidad.')+' Voy a repetir la pregunta.'); }
-      }
-      if(!quantityAccepted) { row.remove(); throw new Error('No se pudo validar la cantidad del insumo. Corrija el dato en pantalla y vuelva a iniciar las preguntas.'); }
+    while (count<5) {
+      const row=addInsumoRow();
+      const select=row.querySelector('.insumo-select');
+      const qty=row.querySelector('.insumo-qty');
+      const item=await askCatalogChoice('¿Qué insumo?',availableItems,select,'insumo');
+      const available=Number(item.disponible)||0;
+      await askNumber(`¿Cantidad de ${item.nombre}? Disponible ${available} ${item.unidad||''}.`,qty,n=>n>0&&n<=available,`Solo hay ${available}. Diga una cantidad menor.`, 'cantidad');
       count++;
-      if(count>=5) { await FincaVoice.say('Se llegó al máximo de cinco insumos en esta entrevista.'); break; }
-      const more=await askYesNo('¿Desea registrar otro insumo? Diga sí o no.'); if(!more) break;
+      if (count>=5) { await FincaVoice.say('Máximo cinco insumos.'); break; }
+      const more=await askYesNo('¿Otro insumo? Sí o no.'); if (!more) break;
     }
   }
-  async function dictateSelectedField() {
-    if(interviewRunning) return;
-    if(!catalogReady) { showNotice('Todavía se están cargando los catálogos. Espere y vuelva a intentarlo.','error'); return; }
-    if(!FincaVoice.supportsRecognition()) { const msg='Este navegador no ofrece reconocimiento de voz. Pruebe Chrome actualizado en Android y compruebe el servicio de voz en español.'; showNotice(msg,'error'); FincaVoice.status(msg); await FincaVoice.say(msg); return; }
-    const field = lastFocusedField;
-    if(!field || !form.contains(field) || !field.matches('input,select,textarea')) {
-      showNotice('Primero toque el campo que quiere dictar y después pulse «Dictar en el campo seleccionado».','error');
-      await FincaVoice.say('Primero toque el campo que quiere completar. Después pulse dictar en el campo seleccionado.'); return;
+  async function startVoiceInterview() {
+    if (interviewRunning) return;
+    if (!catalogReady || !matchCaballon($('caballon').value.trim())) { autoVoicePending=true; return; }
+    if (!FincaVoice.supportsRecognition()) {
+      autoVoicePending=true;
+      const message='Este navegador no permite reconocimiento de voz. Abra la PWA en Chrome actualizado del teléfono.';
+      showNotice(message,'error'); FincaVoice.status(message); return;
     }
-    interviewRunning=true; const button=$('dictate-field-btn'); button.disabled=true;
+    interviewRunning=true; autoVoicePending=false; updateSaveButton();
     try {
-      if(field.id==='empleado') { await askCatalogChoice('Diga el nombre completo de un trabajador de la lista.',catalog.empleados,field,'trabajador'); }
-      else if(field.id==='labor') { await askCatalogChoice('Diga el nombre de una labor de la lista.',catalog.labores,field,'labor'); }
-      else if(field.id==='horas') { await askNumeric('¿Cuántas horas trabajó? Diga entre cero coma cinco y ocho.',field,n=>n>=0.5&&n<=8,'Las horas deben estar entre 0,5 y 8.'); }
-      else if(field.id==='matas') { await askNumeric('¿Cuántas plantas trabajó? Diga un número entero mayor que cero.',field,n=>Number.isInteger(n)&&n>0,'Diga un número entero mayor que cero.'); }
-      else if(field.id==='observaciones') {
-        const answer=await askText('Dicte las observaciones. También puede decir “sin observaciones”.');
-        field.value=/\bsin observaciones\b/i.test(normalize(answer))?'':answer; field.dispatchEvent(new Event('input',{bubbles:true}));
+      const voiceGreetingOk = await FincaVoice.welcome();
+      if (!voiceGreetingOk) { autoVoicePending=true; throw new Error('El navegador bloqueó el audio. Toque la pantalla una vez para activar la voz.'); }
+      if (!validEmployee()) await askCatalogChoice('¿Trabajador?',catalog.empleados,$('empleado'),'trabajador');
+      if (!validLabor()) await askCatalogChoice('¿Labor?',catalog.labores,$('labor'),'labor');
+      if (!validHours()) await askNumber('¿Cuántas horas?', $('horas'), n=>n>=0.5&&n<=8, 'Horas de 0,5 a 8. ¿Cuántas horas?', 'horas');
+      if (!validPlants()) await askNumber('¿Cuántas plantas?', $('matas'), n=>Number.isInteger(n)&&n>0, 'Diga un número entero de plantas. ¿Cuántas plantas?', 'plantas');
+      if (!voiceProgress.insumosDone) {
+        const completeRow=[...document.querySelectorAll('.insumo-row')].some(row=>{
+          const id=row.querySelector('.insumo-select').value, raw=row.querySelector('.insumo-qty').value;
+          const item=catalog.insumos.find(x=>String(x.id)===String(id));
+          return !!item && raw!=='' && Number(raw)>0 && Number(raw)<=Number(item.disponible);
+        });
+        if (!completeRow) await askInsumos();
+        voiceProgress.insumosDone=true;
       }
-      else if(field.id==='caballon') {
-        await FincaVoice.say('El caballón debe venir de un código QR válido. No lo inventaré por voz. Escanee el QR con la cámara que está al comienzo de la pantalla.');
-        $('qr-area').hidden=false; if(window.FincaCamera) void window.FincaCamera.start();
-        const ok=await waitForQr(90000); if(!ok) throw new Error('No se leyó un QR válido.');
+      if (!voiceProgress.observationsDone) {
+        if (!$('observaciones').value.trim()) {
+          const answer=await askText('¿Observaciones? Diga ninguna si no hay.');
+          $('observaciones').value=/\b(sin observaciones|ninguna|ninguno|nada)\b/i.test(normalize(answer))?'':answer;
+          $('observaciones').dispatchEvent(new Event('input',{bubbles:true}));
+        }
+        voiceProgress.observationsDone=true;
       }
-      else if(field.classList.contains('insumo-select')) { await askCatalogChoice('Diga el nombre exacto de un insumo de la lista.',catalog.insumos,field,'insumo'); renderInsumoStockText(); }
-      else if(field.classList.contains('insumo-qty')) {
-        const row=field.closest('.insumo-row'); const id=row && row.querySelector('.insumo-select').value;
-        const item=catalog.insumos.find(x=>String(x.id)===String(id));
-        if(!item) throw new Error('Primero seleccione un insumo oficial de la lista.');
-        const available=Number(item.disponible)||0;
-        await askNumeric(`¿Qué cantidad de ${item.nombre} utilizó? Hay ${available} ${item.unidad||''} disponibles.`,field,n=>n>0&&n<=available,`La cantidad debe ser mayor que cero y no superar la existencia de ${available} ${item.unidad||''}.`);
-        renderInsumoStockText();
+      updateSaveButton();
+      const send=await askYesNo('¿Guardar registro? Sí o no.');
+      if (send) {
+        await FincaVoice.say('Guardando.');
+        await saveRecord({preventDefault(){}},true);
+      } else {
+        showNotice('Los datos quedan en pantalla para revisarlos.','info');
+        await FincaVoice.say('Datos en pantalla.');
       }
-      else if(field.id==='fecha') { throw new Error('La fecha se completa automáticamente. Seleccione otro campo para dictar.'); }
-      else { throw new Error('Este campo no tiene dictado de voz configurado.'); }
-      showNotice('Dato dictado y validado.','success'); updateSaveButton();
-    } catch(error) { showNotice(error.message||String(error),'error'); await FincaVoice.say(error.message||'No se pudo completar el campo.'); }
-    finally { interviewRunning=false; button.disabled=false; updateSaveButton(); }
+    } catch (error) {
+      showNotice(error.message || 'Se interrumpió la entrevista.', 'error');
+      await FincaVoice.say(error.message || 'Se interrumpió la voz.', {silentError:true});
+      if (isFatalVoiceError(error)) {
+        autoVoicePending=true;
+        showNotice((error.message || 'Voz bloqueada.') + ' Toque una vez la pantalla para volver a intentar.', 'error');
+      }
+    } finally {
+      interviewRunning=false; updateSaveButton();
+      if (cameraRestartPending && window.FincaCamera) {
+        cameraRestartPending=false; window.setTimeout(()=>void window.FincaCamera.start(),500);
+      }
+    }
   }
 
-  function waitForQr(timeoutMs) {
-    return new Promise(resolve=>{
-      if(matchCaballon($('caballon').value)){resolve(true);return;}
-      const field=$('caballon'); let done=false;
-      const cleanup=()=>{clearTimeout(timer);field.removeEventListener('input',check);};
-      const finish=ok=>{if(done)return;done=true;cleanup();resolve(ok);};
-      const check=()=>{if(matchCaballon(field.value))finish(true);};
-      field.addEventListener('input',check);
-      const timer=setTimeout(()=>finish(false),timeoutMs);
-    });
-  }
   async function syncAndRender() { await FincaSync.run(); await renderRecords(); }
-  function networkStatus(){ $('network').textContent=navigator.onLine?'Con conexión':'Sin internet'; }
+  function networkStatus() { const el=$('network'); if(el) el.textContent=navigator.onLine?'Con conexión':'Sin internet'; }
   $('fecha').value=todayLocal();
-  $('voice-btn').addEventListener('click',startVoiceInterview);
-  $('dictate-field-btn').addEventListener('click',dictateSelectedField);
-  document.addEventListener('focusin', event => {
-    const target=event.target;
-    if(form.contains(target) && target.matches('input,select,textarea')) lastFocusedField=target;
-  });
-  // Capture mobile taps too, in case the browser changes focus while opening a native select.
-  form.addEventListener('pointerdown', event => {
-    const target=event.target.closest('input,select,textarea');
-    if(target) lastFocusedField=target;
-  }, true);
-  $('add-insumo').addEventListener('click',()=>addInsumoRow());
   $('caballon').addEventListener('input',onQrChange);
   $('record-form').addEventListener('input',updateSaveButton);
   $('record-form').addEventListener('change',updateSaveButton);
-  $('record-form').addEventListener('submit',saveRecord);
+  $('record-form').addEventListener('submit',event=>{void saveRecord(event,false);});
+  $('add-insumo').addEventListener('click',()=>addInsumoRow());
   $('sync-btn').addEventListener('click',syncAndRender);
   $('export-btn').addEventListener('click',async()=>{
     const records=await FincaDB.all(); const blob=new Blob([JSON.stringify(records,null,2)],{type:'application/json'});
-    const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url;a.download='respaldo-registros-finca.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download='respaldo-registros-finca.json'; a.click(); setTimeout(()=>URL.revokeObjectURL(url),1000);
   });
-  window.addEventListener('online',()=>{networkStatus();void syncAndRender();});
-  window.addEventListener('offline',networkStatus);networkStatus();
+  window.addEventListener('online',()=>{networkStatus();void syncAndRender();void loadCatalogs();});
+  window.addEventListener('offline',networkStatus); networkStatus();
+  // Si el reconocimiento automático es bloqueado por el navegador, cualquier toque de pantalla
+  // posterior sirve de gesto de autorización; no se muestra un botón adicional.
+  document.addEventListener('pointerdown',()=>{
+    if (autoVoicePending && !interviewRunning && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
+  },true);
   void locate();
   void loadCatalogs();
   void renderRecords();
-  window.addEventListener('load', () => {
-    window.setTimeout(() => {
-      void FincaVoice.welcome().then(ok => {
-        if (!ok) FincaVoice.status('El navegador bloqueó el saludo automático o no tiene una voz española disponible. Pulse «Iniciar entrevista guiada» para probar audio y micrófono.');
-      });
-    }, 1200);
-  }, {once:true});
-  if('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>reg.update()).catch(err=>console.warn('No se pudo actualizar el caché PWA:',err)));
   }
 })();

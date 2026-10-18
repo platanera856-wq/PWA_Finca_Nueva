@@ -87,7 +87,7 @@
       if (normalized.includes('notfound') || normalized.includes('requested device not found')) {
         setStatus('No se encontró una cámara en este dispositivo. Pruebe desde el teléfono o conecte una cámara.');
       } else {
-        setStatus(`No se pudo iniciar cámara/QR: ${detail}. Revise el permiso de cámara o pulse Reintentar.`);
+        setStatus(`No se pudo iniciar cámara/QR: ${detail}. Revise el permiso y recargue la aplicación.`);
       }
       await stopScanner(false);
     } finally {
@@ -102,7 +102,7 @@
     if (close) close.addEventListener('click', async () => {
       // No ocultar el panel: el botón para reintentar debe permanecer accesible.
       await stopScanner(false);
-      setStatus('Cámara cerrada. Puede volver a abrirla con Reintentar cámara / QR.');
+      setStatus('Cámara detenida.');
     });
     // Intento automático como solicita la aplicación original. El navegador todavía puede requerir permiso.
     window.addEventListener('load', () => {
