@@ -1,6 +1,7 @@
-const CACHE_NAME = 'finca-pwa-v050-voz-local';
-const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v1';
-const VOSK_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js';
+const CACHE_NAME = 'finca-pwa-v051-voz-local';
+const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v2';
+const VOSK_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js?v=051';
+const VOSK_PACKAGE_PREFIX = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/';
 const CORE_ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/config.js', './js/api.js', './js/db.js', './js/voice.js',
@@ -32,7 +33,7 @@ self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
     // Nunca borrar el caché grande del modelo local.
-    await Promise.all(keys.filter(k => k.startsWith('finca-pwa-') && k !== CACHE_NAME).map(k => caches.delete(k)));
+    await Promise.all(keys.filter(k => (k.startsWith('finca-pwa-') && k !== CACHE_NAME) || k === 'finca-voice-model-cache-v1').map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
@@ -43,18 +44,22 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
   const requested = url.href.split('?')[0];
 
-  // Permite utilizar la biblioteca Vosk guardada en el caché aunque el CDN no responda.
-  if (requested === VOSK_URL) {
+  // Guardar tanto el bundle principal como cualquier recurso del paquete Vosk (worker/WASM)
+  // que la versión publicada solicite, para que pueda reutilizarse en modo avión.
+  if (url.href.startsWith(VOSK_PACKAGE_PREFIX)) {
     event.respondWith((async () => {
       const cache = await caches.open(CACHE_NAME);
+      const key = new Request(req.url, { method: 'GET', mode: 'cors', credentials: 'omit' });
       try {
         const fresh = await fetch(req, { cache: 'no-cache' });
-        if (fresh && fresh.ok) await cache.put(VOSK_URL, fresh.clone());
+        if (fresh && fresh.ok) {
+          try { await cache.put(key, fresh.clone()); } catch (_) {}
+        }
         return fresh;
       } catch (_) {
-        const cached = await cache.match(VOSK_URL);
+        const cached = await cache.match(key) || await cache.match(req.url.split('?')[0]);
         if (cached) return cached;
-        throw new Error('La biblioteca de voz Vosk no está en el caché del teléfono. Conéctese a internet una vez.');
+        throw new Error('Falta un recurso local del motor Vosk en el caché del teléfono. Conéctese y vuelva a preparar la voz.');
       }
     })());
     return;
