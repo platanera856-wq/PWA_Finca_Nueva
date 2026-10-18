@@ -21,6 +21,8 @@
     const voices = window.speechSynthesis.getVoices() || [];
     return voices.find(v => /^es-CO$/i.test(v.lang)) || voices.find(v => /^es(-|$)/i.test(v.lang)) || null;
   }
+  function supportsRecognition() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+  function supportsSpeechOutput() { return ('speechSynthesis' in window) && typeof SpeechSynthesisUtterance === 'function'; }
   function say(text, opts = {}) {
     return new Promise(resolve => {
       if (!('speechSynthesis' in window) || typeof SpeechSynthesisUtterance !== 'function') {
@@ -109,5 +111,5 @@
     if (/\b(si|claro|correcto|afirmativo|utilice|use)\b/.test(s)) return true;
     return null;
   }
-  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status };
+  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, supportsRecognition, supportsSpeechOutput };
 })();

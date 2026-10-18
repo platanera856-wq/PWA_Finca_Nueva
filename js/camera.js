@@ -100,7 +100,8 @@
     const close = $('stop-camera');
     if (retry) retry.addEventListener('click', () => { void startScanner('manual'); });
     if (close) close.addEventListener('click', async () => {
-      await stopScanner(true);
+      // No ocultar el panel: el botón para reintentar debe permanecer accesible.
+      await stopScanner(false);
       setStatus('Cámara cerrada. Puede volver a abrirla con Reintentar cámara / QR.');
     });
     // Intento automático como solicita la aplicación original. El navegador todavía puede requerir permiso.
