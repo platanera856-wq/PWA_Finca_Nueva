@@ -311,15 +311,16 @@
       rec.lang = 'es-CO'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 5;
       let done = false, gotText = false, latestInterim = '';
       let silenceTimer = null;
-      const timer = setTimeout(() => {
-        // No extender silenciosamente la escucha indefinidamente: los 30 s son el
-        // máximo para que el trabajador empiece a responder, no un retraso intencional.
-        if (latestInterim) finish(null, latestInterim);
-        else finish(new Error('No se escuchó una respuesta.'));
-      }, timeoutMs);
+      let responseTimer = null;
+      // No confundir el tiempo de arranque del servicio con el tiempo del trabajador
+      // para responder. Si Chrome no inicia la escucha, informar pronto, no esperar 30 s.
+      let startTimer = setTimeout(() => finish(new Error('El reconocimiento de voz no inició. Revise el permiso del micrófono y vuelva a intentarlo.')), 7000);
       function finish(err, text) {
         if (done) return;
-        done = true; clearTimeout(timer); if (silenceTimer) clearTimeout(silenceTimer);
+        done = true;
+        if (startTimer) clearTimeout(startTimer);
+        if (responseTimer) clearTimeout(responseTimer);
+        if (silenceTimer) clearTimeout(silenceTimer);
         try { rec.abort(); } catch (_) {}
         if (err) reject(err); else resolve(text);
       }
@@ -340,7 +341,15 @@
         // como final. Si deja de cambiar durante 1.4 s, entregamos lo reconocido.
         silenceTimer = setTimeout(() => finish(null, latestInterim), 1400);
       }
-      rec.onstart = () => status('Escuchando con el servicio del navegador…');
+      rec.onstart = () => {
+        if (startTimer) { clearTimeout(startTimer); startTimer = null; }
+        status('Escuchando con el servicio del navegador…');
+        // Los 30 s empiezan únicamente cuando Chrome confirma que está escuchando.
+        responseTimer = setTimeout(() => {
+          if (latestInterim) finish(null, latestInterim);
+          else finish(new Error('No se escuchó una respuesta.'));
+        }, timeoutMs);
+      };
       rec.onresult = event => {
         const results = event.results;
         if (!results || !results.length) return;
@@ -381,14 +390,19 @@
     const BrowserRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (navigator.onLine && BrowserRecognition) {
       try {
+        // Con internet se conserva el reconocedor del navegador. No cambiar a Vosk
+        // automáticamente tras 30 s sin resultado: eso abría una segunda escucha de
+        // otros 30 s y hacía parecer que la app no aceptaba la respuesta.
         return await listenBrowser(timeoutMs, acceptCandidate);
       } catch (error) {
-        // Los fallos de permisos/micrófono no se arreglan cambiando de motor.
+        // Solo usar Vosk si el propio navegador informa un fallo de red del servicio.
+        // Errores de silencio/tiempo se devuelven al flujo para repetir la pregunta.
         const message = String(error && error.message || error || '');
-        if (/micrófono está bloqueado|no se encontró un micrófono|no se pudo iniciar el micrófono|no ofrece acceso al micrófono/i.test(message)) throw error;
-        if (!offlineModel) throw error;
-        console.warn('Falló el reconocimiento conectado; se probará Vosk local:', error);
-        return listenLocal(timeoutMs);
+        if (/necesita internet|network|conexión.*reconocimiento/i.test(message) && offlineModel) {
+          console.warn('Falló el servicio conectado; se probará Vosk local:', error);
+          return listenLocal(timeoutMs);
+        }
+        throw error;
       }
     }
 
