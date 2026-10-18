@@ -1,0 +1,35 @@
+AJUSTE PUNTUAL EN APPS SCRIPT — conservar el resto del backend
+
+IMPORTANTE: No reemplace todo Code.gs con otro archivo. Haga solamente los cambios siguientes en la función guardarRegistro(datos) del proyecto de Apps Script que usa actualmente la PWA. Esto es necesario porque el servidor actual asigna new Date() al momento de recibir una sincronización offline.
+
+CAMBIO A: buscar este bloque actual:
+
+    const tarifa = numero_(empleado[2]);
+    const costoEmpleado = tarifa * horas;
+    const fecha = new Date();
+    const idLabor = 'LR' + fecha.getTime() + '-' +
+      Utilities.getUuid().slice(0, 6).toUpperCase();
+
+Reemplazar por:
+
+    const tarifa = numero_(empleado[2]);
+    const costoEmpleado = tarifa * horas;
+    // Momento de recepción en el servidor: se usa para generar el ID.
+    const fechaRecepcion = new Date();
+    // Momento de captura original en el teléfono, incluso si se sincroniza después.
+    const valorFechaCaptura = datos.fechaCaptura || datos.createdAt || '';
+    const fechaCapturaCandidata = valorFechaCaptura ? new Date(valorFechaCaptura) : null;
+    const fechaRegistro = fechaCapturaCandidata &&
+      Number.isFinite(fechaCapturaCandidata.getTime())
+        ? fechaCapturaCandidata
+        : fechaRecepcion;
+    const idLabor = 'LR' + fechaRecepcion.getTime() + '-' +
+      Utilities.getUuid().slice(0, 6).toUpperCase();
+
+CAMBIO B: dentro del arreglo de shRegistro.appendRow([...]), cambiar SOLO el segundo valor (ahora dice `fecha`) por `fechaRegistro`. No cambie ninguna otra columna.
+
+CAMBIO C: dentro del arreglo de shMov.appendRow([...]), cambiar SOLO el séptimo valor (ahora dice `fecha`) por `fechaRegistro`.
+
+Después, guarde el proyecto y actualice la implementación web existente con una nueva versión, conservando la misma URL /exec. No cree una implementación nueva. Si no actualiza la implementación, las horas en Sheets seguirán siendo las de sincronización.
+
+Compatibilidad: los registros antiguos sin fechaCaptura siguen funcionando; en ellos el servidor utilizará la hora actual como antes.
