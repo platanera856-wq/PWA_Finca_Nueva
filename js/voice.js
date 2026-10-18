@@ -5,8 +5,6 @@
   let welcomePlayed = false;
   let audioUnlocked = false;
   let firstVoiceListCheck = false;
-  let unlockPlaybackPromise = Promise.resolve(true);
-  let speechQueue = Promise.resolve(true);
   // Mantener vivo un AudioContext iniciado durante un gesto real del usuario.
   // En Android, contextos nuevos creados después de hablar pueden quedar suspendidos.
   let localAudioContext = null;
@@ -69,40 +67,19 @@
   }
 
   // El mismo toque desbloquea síntesis y audio de entrada, sin crear botones nuevos.
-  // Conservamos la promesa del silencio inicial para que no se cancele justo cuando
-  // la aplicación empieza a pronunciar la primera pregunta.
   function unlockAudio() {
     void primeLocalAudioContext().catch(error => console.warn('No se pudo preparar el audio local:', error));
-    if (!supportsSpeechOutput()) return false;
-    if (audioUnlocked) return true;
+    if (audioUnlocked || !supportsSpeechOutput()) return audioUnlocked;
     try {
       const synth = window.speechSynthesis;
       synth.getVoices();
-      unlockPlaybackPromise = new Promise(resolve => {
-        let settled = false;
-        let timer = null;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          if (timer) clearTimeout(timer);
-          audioUnlocked = true;
-          resolve(true);
-        };
-        const unlock = new SpeechSynthesisUtterance(' ');
-        unlock.lang = 'es-CO'; unlock.volume = 0; unlock.rate = 1;
-        unlock.onstart = () => { audioUnlocked = true; };
-        unlock.onend = finish;
-        unlock.onerror = finish;
-        try {
-          synth.speak(unlock);
-          audioUnlocked = true;
-          // Algunos motores no disparan onend para una utterance vacía.
-          timer = setTimeout(finish, 700);
-        } catch (error) {
-          console.warn('No se pudo desbloquear la salida de voz:', error);
-          finish();
-        }
-      });
+      const unlock = new SpeechSynthesisUtterance(' ');
+      unlock.lang = 'es-CO'; unlock.volume = 0; unlock.rate = 1;
+      unlock.onstart = () => { audioUnlocked = true; };
+      unlock.onend = () => { audioUnlocked = true; };
+      unlock.onerror = () => {};
+      synth.speak(unlock);
+      audioUnlocked = true;
       return true;
     } catch (error) {
       console.warn('No se pudo desbloquear la salida de voz:', error);
@@ -124,110 +101,54 @@
         resolve();
       };
       try { window.speechSynthesis.addEventListener('voiceschanged', finish); } catch (_) {}
-      setTimeout(finish, 1200);
+      setTimeout(finish, 900);
     });
-    return window.speechSynthesis.getVoices() || [];
-  }
-
-  function chooseSpanishVoice(voices) {
-    const spanish = (voices || []).filter(v => /^es(?:-|$)/i.test(String(v.lang || '')));
-    if (!spanish.length) return null;
-    const colombian = spanish.filter(v => /^es-CO$/i.test(String(v.lang || '')));
-    // En modo avión se prefiere una voz instalada en el teléfono. Las voces remotas
-    // pueden reproducir de forma incompleta o no estar disponibles sin red.
-    if (!navigator.onLine) {
-      return colombian.find(v => v.localService === true)
-        || spanish.find(v => v.localService === true)
-        || colombian[0] || spanish[0];
-    }
-    return colombian[0] || spanish.find(v => v.localService === true) || spanish[0];
-  }
-
-  async function sayNow(phrase, opts = {}) {
-    if (!supportsSpeechOutput()) {
-      status('Este navegador no ofrece salida de voz.');
-      return false;
-    }
-    if (!phrase) return true;
-    const synth = window.speechSynthesis;
-    let voices = [];
-    try {
-      // No cancelar cada frase: Android puede cortar las primeras sílabas si se llama
-      // cancel() inmediatamente después del evento onend anterior.
-      try { await unlockPlaybackPromise; } catch (_) {}
-      voices = await loadAvailableVoices();
-
-      // Si hay una utterance aún terminando, esperamos. Solo se cancela como último
-      // recurso si el motor no queda libre después de una espera razonable.
-      const idleDeadline = Date.now() + 1800;
-      while ((synth.speaking || synth.pending) && Date.now() < idleDeadline) await wait(45);
-      if (synth.speaking || synth.pending) {
-        try { synth.cancel(); } catch (_) {}
-        await wait(220);
-      }
-      // Pequeña separación para que el motor Android arranque desde el inicio de la frase.
-      await wait(180);
-
-      const utterance = new SpeechSynthesisUtterance(phrase);
-      utterance.lang = 'es-CO';
-      utterance.rate = 0.86;
-      utterance.pitch = 1;
-      utterance.volume = 1;
-      const spanish = chooseSpanishVoice(voices);
-      if (spanish) {
-        utterance.voice = spanish;
-        utterance.lang = spanish.lang || 'es-CO';
-      }
-      return await new Promise(resolve => {
-        let settled = false;
-        let watchdog = null;
-        const finish = ok => {
-          if (settled) return;
-          settled = true;
-          if (watchdog) clearTimeout(watchdog);
-          resolve(ok);
-        };
-        utterance.onstart = () => {
-          audioUnlocked = true;
-          if (opts.onStart) opts.onStart();
-        };
-        utterance.onend = () => {
-          // Asegurar que el motor libera la frase anterior antes de hablar otra vez.
-          void wait(120).then(() => finish(true));
-        };
-        utterance.onerror = event => {
-          const reason = event && event.error ? event.error : 'error';
-          if (!opts.silentError) status('No se pudo reproducir el audio (' + reason + '). Toque una vez la pantalla y vuelva a intentar.');
-          finish(false);
-        };
-        watchdog = setTimeout(() => {
-          try { synth.cancel(); } catch (_) {}
-          if (!opts.silentError) status('La voz tardó demasiado en responder. Revise que el teléfono tenga una voz española instalada para usar sin internet.');
-          finish(false);
-        }, Math.min(25000, Math.max(7000, phrase.length * 190 + 4000)));
-        try {
-          synth.resume();
-          synth.speak(utterance);
-        } catch (error) {
-          console.error('Error del sintetizador de voz:', error);
-          if (!opts.silentError) status('No se pudo reproducir el audio. Revise el sonido y la voz española instalada en el teléfono.');
-          finish(false);
-        }
-      });
-    } catch (error) {
-      console.error('Error preparando voz:', error);
-      if (!opts.silentError) status('No se pudo preparar la voz. Revise el sonido y los permisos del teléfono.');
-      return false;
-    }
+    voices = window.speechSynthesis.getVoices() || [];
+    return voices;
   }
 
   function say(text, opts = {}) {
-    const phrase = String(text || '').trim();
-    // Serializar todos los enunciados evita que una pregunta interrumpa la anterior.
-    const task = () => sayNow(phrase, opts);
-    const queued = speechQueue.then(task, task);
-    speechQueue = queued.catch(() => false);
-    return queued;
+    return new Promise(resolve => {
+      if (!supportsSpeechOutput()) { status('Este navegador no ofrece salida de voz.'); resolve(false); return; }
+      let settled = false;
+      let watchdog = null;
+      const phrase = String(text || '').trim();
+      const finish = ok => { if (settled) return; settled = true; if (watchdog) clearTimeout(watchdog); resolve(ok); };
+      if (!phrase) { finish(true); return; }
+      (async () => {
+        try {
+          const synth = window.speechSynthesis;
+          // Get the voice list early; some Android builds populate it asynchronously.
+          const voices = await loadAvailableVoices();
+          // Cancel only if there is an old utterance, then pause briefly. A zero-delay
+          // speak immediately after cancel is unreliable on Chrome for Android.
+          if (synth.speaking || synth.pending) {
+            synth.cancel();
+            await wait(140);
+          }
+          try { synth.resume(); } catch (_) {}
+          const utterance = new SpeechSynthesisUtterance(phrase);
+          utterance.lang = 'es-CO'; utterance.rate = 0.90; utterance.pitch = 1; utterance.volume = 1;
+          const spanish = voices.find(v => /^es-CO$/i.test(v.lang)) || voices.find(v => /^es(-|$)/i.test(v.lang));
+          if (spanish) { utterance.voice = spanish; utterance.lang = spanish.lang || 'es-CO'; }
+          utterance.onstart = () => { audioUnlocked = true; if (opts.onStart) opts.onStart(); };
+          utterance.onend = () => finish(true);
+          utterance.onerror = event => {
+            const reason = event && event.error ? event.error : 'error';
+            if (!opts.silentError) status('No se pudo reproducir el audio (' + reason + '). Toque una vez la pantalla y vuelva a intentar.');
+            finish(false);
+          };
+          watchdog = setTimeout(() => finish(false), Math.min(16000, Math.max(5000, phrase.length * 145 + 3000)));
+          // An extra scheduling turn after cancel avoids dropped utterances on Android.
+          await wait(80);
+          synth.speak(utterance);
+        } catch (error) {
+          console.error('Error del sintetizador de voz:', error);
+          if (!opts.silentError) status('No se pudo reproducir el audio. Revise el sonido y los permisos del teléfono.');
+          finish(false);
+        }
+      })();
+    });
   }
   // acceptCandidate permite seleccionar una alternativa de reconocimiento que coincida
   // con un catálogo o que contenga un número válido, y no quedarse con la primera transcripción errónea.
@@ -358,43 +279,27 @@
       let recognizer = null;
       let timer = null;
       let partialTimer = null;
-      let finalTimer = null;
       let latestPartial = '';
-      const finalSegments = [];
-      const cleanText = value => String(value || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
-      const finalText = () => finalSegments.join(' ').replace(/\s+/g, ' ').trim();
-      const combinedText = () => {
-        const fixed = finalText();
-        const partial = String(latestPartial || '').trim();
-        if (!fixed) return partial;
-        if (!partial) return fixed;
-        const f = cleanText(fixed), q = cleanText(partial);
-        if (q === f || f.endsWith(' ' + q)) return fixed;
-        if (q.startsWith(f + ' ')) return partial;
-        return (fixed + ' ' + partial).replace(/\s+/g, ' ').trim();
-      };
+
       const candidateIsValid = text => {
         if (typeof acceptCandidate !== 'function') return false;
         try { return !!acceptCandidate(text); } catch (_) { return false; }
       };
-      const clearTimers = () => {
-        if (timer) clearTimeout(timer);
-        if (partialTimer) clearTimeout(partialTimer);
-        if (finalTimer) clearTimeout(finalTimer);
-      };
       const cleanup = async () => {
-        clearTimers();
+        if (partialTimer) clearTimeout(partialTimer);
         if (processor) { try { processor.disconnect(); } catch (_) {} processor.onaudioprocess = null; }
         if (source) { try { source.disconnect(); } catch (_) {} }
         if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
         if (recognizer) { try { recognizer.remove(); } catch (_) {} }
-        // No cerrar el contexto compartido: Android puede suspender contextos recién creados.
+        // No cerrar el contexto compartido: Android puede suspender los contextos
+        // recién creados al comenzar una respuesta automática tras la pregunta.
         if (activeLocalSession && activeLocalSession.recognizer === recognizer) activeLocalSession = null;
       };
       const finish = (error, text) => {
         if (settled) return;
         settled = true;
-        clearTimers();
+        if (timer) clearTimeout(timer);
+        if (partialTimer) clearTimeout(partialTimer);
         void cleanup().then(() => {
           if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
           else {
@@ -404,16 +309,6 @@
           }
         });
       };
-      const settleIfUseful = (candidate, delay = 1100) => {
-        if (finalTimer) clearTimeout(finalTimer);
-        finalTimer = setTimeout(() => {
-          if (settled) return;
-          const full = combinedText() || candidate;
-          if (!full) return;
-          if (typeof acceptCandidate !== 'function' || candidateIsValid(full)) finish(null, full);
-          else status('Escuchando sin internet… todavía no se completa la respuesta: ' + full);
-        }, delay);
-      };
 
       (async () => {
         try {
@@ -422,87 +317,52 @@
           }
           if (!offlineModel) await prepareOffline();
           mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true, channelCount: { ideal: 1 }, sampleRate: { ideal: 16000 } },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 },
             video: false
           });
           audioContext = await getLocalAudioContext();
-          // El modelo español trabaja a 16 kHz. Algunos teléfonos siguen entregando
-          // buffers a 44.1/48 kHz aunque se solicite 16 kHz; se remuestrean abajo.
           recognizer = new offlineModel.KaldiRecognizer(16000);
           recognizer.on('result', message => {
-            if (settled) return;
             const text = String(message && message.result && message.result.text || '').trim();
-            if (!text) return;
-            const previous = finalText();
-            const nText = cleanText(text), nPrevious = cleanText(previous);
-            if (!previous) finalSegments.push(text);
-            else if (nText === nPrevious || nPrevious.endsWith(' ' + nText)) {
-              // Vosk puede repetir el segmento ya finalizado; no duplicarlo.
-            } else if (nText.startsWith(nPrevious + ' ')) {
-              finalSegments.splice(0, finalSegments.length, text);
-            } else {
-              finalSegments.push(text);
-            }
-            latestPartial = '';
-            status('Voz reconocida sin internet: ' + finalText());
-            // Dar una pausa corta para capturar un apellido o segundo término que llegue
-            // como otro segmento; no cerrar el turno al primer fragmento reconocido.
-            settleIfUseful(finalText(), 1150);
+            if (text) finish(null, text);
           });
           recognizer.on('partialresult', message => {
             if (settled) return;
             const partial = String(message && message.result && message.result.partial || '').trim();
             if (!partial) return;
             latestPartial = partial;
-            const candidate = combinedText();
-            status('Escuchando sin internet… Se reconoce: ' + candidate);
+            status('Escuchando sin internet… Se reconoce: ' + partial);
             if (partialTimer) clearTimeout(partialTimer);
-            if (finalTimer) { clearTimeout(finalTimer); finalTimer = null; }
-            // Esperar un silencio real algo más largo que antes para recoger nombres completos.
+            // Vosk liefert laufend partialresult. Wenn die Äußerung kurz pausiert,
+            // darf die App eine stabile Teiltranskription verwenden, statt bis zum
+            // Ende des gesamten Zeitfensters auf ein finales result zu warten.
             partialTimer = setTimeout(() => {
-              if (settled) return;
-              const full = combinedText();
-              if (full && (typeof acceptCandidate !== 'function' || candidateIsValid(full))) finish(null, full);
-            }, 1750);
+              if (settled || !latestPartial) return;
+              // Para nombres/labores/insumos, preferir un parcial que ya coincida
+              // con el catálogo. Si aún no coincide, seguir escuchando hasta el
+              // resultado final o hasta agotar los mismos 30 s que usa el modo online.
+              if (typeof acceptCandidate !== 'function' || candidateIsValid(latestPartial)) {
+                finish(null, latestPartial);
+              }
+            }, 1400);
           });
           source = audioContext.createMediaStreamSource(mediaStream);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
           processor.onaudioprocess = event => {
             if (settled || !recognizer) return;
-            try {
-              const input = event.inputBuffer;
-              const inputRate = Number(input.sampleRate) || Number(audioContext.sampleRate) || 16000;
-              let modelBuffer = input;
-              if (inputRate !== 16000) {
-                // Remuestreo por promedio de ventanas cortas (con filtrado sencillo antialias)
-                // para entregar a Vosk un AudioBuffer auténtico de 16 kHz.
-                const inputData = input.getChannelData(0);
-                const ratio = inputRate / 16000;
-                const outputLength = Math.max(1, Math.floor(inputData.length / ratio));
-                const outputData = new Float32Array(outputLength);
-                for (let i = 0; i < outputLength; i++) {
-                  const start = Math.floor(i * ratio);
-                  const end = Math.min(inputData.length, Math.max(start + 1, Math.floor((i + 1) * ratio)));
-                  let sum = 0;
-                  for (let j = start; j < end; j++) sum += inputData[j];
-                  outputData[i] = sum / (end - start);
-                }
-                modelBuffer = audioContext.createBuffer(1, outputLength, 16000);
-                modelBuffer.copyToChannel(outputData, 0);
-              }
-              recognizer.acceptWaveform(modelBuffer);
-            } catch (error) { console.error('Vosk acceptWaveform:', error); status('Error al procesar el audio sin internet. Revise el estado de voz.'); }
+            try { recognizer.acceptWaveform(event.inputBuffer); }
+            catch (error) { console.error('Vosk acceptWaveform:', error); }
             const output = event.outputBuffer;
             if (output) for (let channel = 0; channel < output.numberOfChannels; channel++) output.getChannelData(channel).fill(0);
           };
           source.connect(processor);
           processor.connect(audioContext.destination);
           activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
+          // Igual que con internet: el plazo completo para responder empieza solo
+          // cuando el micrófono y el reconocedor están activos, no durante su arranque.
           status('Escuchando sin internet… Hable ahora.');
-          // Los 30 s empiezan después de activar micrófono y reconocedor.
           timer = setTimeout(() => {
-            const full = combinedText();
-            if (full) finish(null, full);
+            if (latestPartial) finish(null, latestPartial);
             else finish(new Error('No se escuchó una respuesta.'));
           }, timeoutMs);
         } catch (error) {
@@ -536,32 +396,11 @@
         try { rec.abort(); } catch (_) {}
         if (err) reject(err); else resolve(text);
       }
-      function transcriptCandidates(results) {
-        const alternativesByPart = Array.from(results || []).map(result =>
-          Array.from(result || []).map(item => String(item && item.transcript || '').trim()).filter(Boolean)
-        );
-        const base = alternativesByPart.map(items => items[0] || '').filter(Boolean);
-        const candidates = [];
-        const add = value => { const text = String(value || '').replace(/\s+/g, ' ').trim(); if (text && !candidates.includes(text)) candidates.push(text); };
-        add(base.join(' '));
-        // Construir frases completas usando cada alternativa de cada segmento, para que
-        // una variante reconocida de un apellido o insumo pueda coincidir con el catálogo.
-        for (let i = 0; i < alternativesByPart.length && candidates.length < 24; i++) {
-          for (let j = 1; j < alternativesByPart[i].length && candidates.length < 24; j++) {
-            const variant = base.slice();
-            variant[i] = alternativesByPart[i][j];
-            add(variant.join(' '));
-          }
-        }
-        return candidates;
-      }
       function choose(candidates) {
         const valid = candidates.map(value => String(value || '').trim()).filter(Boolean);
         if (!valid.length) return '';
         if (typeof acceptCandidate === 'function') {
-          for (const candidate of valid) {
-            try { if (acceptCandidate(candidate)) return candidate; } catch (_) {}
-          }
+          try { return valid.find(candidate => acceptCandidate(candidate)) || valid[0]; } catch (_) {}
         }
         return valid[0];
       }
@@ -586,11 +425,11 @@
       rec.onresult = event => {
         const results = event.results;
         if (!results || !results.length) return;
-        const candidates = transcriptCandidates(results);
+        const last = results[results.length - 1];
+        const candidates = Array.from(last).map(item => String(item.transcript || '').trim()).filter(Boolean);
         if (!candidates.length) return;
         const chosen = choose(candidates);
-        const last = results[results.length - 1];
-        if (last && last.isFinal) {
+        if (last.isFinal) {
           gotText = true;
           finish(null, chosen || latestInterim);
         } else {
