@@ -24,6 +24,7 @@
         <h3>Escanear QR del caballón</h3>
         <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
         <p id="qr-status" class="note" aria-live="polite">Preparando cámara y lector QR…</p>
+        <p id="voice-status" class="note voice-status" role="status" aria-live="polite">Preparando el reconocimiento de voz en español… Mantenga internet activo hasta que indique que la voz sin conexión está lista.</p>
       </div>
       <h3>Datos de la labor</h3>
       <label>Fecha de la labor (se completa automáticamente)
@@ -50,7 +51,6 @@
       <label>Observaciones
         <textarea id="observaciones" name="observaciones" rows="3" placeholder="Observaciones de la labor"></textarea>
       </label>
-      <p id="voice-status" class="sr-only" aria-live="polite"></p>
       <button id="save-btn" class="primary" type="submit" disabled>Guardar registro</button>
     </form>
   </section>
@@ -67,6 +67,7 @@
 <script src="./js/config.js"></script>
 <script src="./js/api.js"></script>
 <script src="./js/db.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js" crossorigin="anonymous"></script>
 <script src="./js/voice.js"></script>
 <script src="./js/html5-qrcode.min.js"></script>
 <script src="./js/camera.js"></script>
