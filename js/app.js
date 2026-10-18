@@ -145,8 +145,13 @@
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj)\b/g,'deshoje');
     s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    // Variantes fonéticas frecuentes de reconocimiento de «insecticida».
-    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas)\b/g, match => match === 'insecticidas' ? 'insecticida' : 'insecticida');
+    // Variantes fonéticas frecuentes de reconocimiento de insumos y nombres propios.
+    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas)\b/g, 'insecticida');
+    // Las vocales y consonantes pueden variar en las transcripciones de nombres propios.
+    s = s.replace(/\b(elquin|elkyn|elkinh)\b/g, 'elkin');
+    // Variantes comunes de los dos insumos señalados en las pruebas de campo.
+    s = s.replace(/\b(codornasa|codornassa|codorna za)\b/g, 'codornaza');
+    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina za)\b/g, 'gallinaza');
     return s;
   }
   const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor']);
@@ -166,9 +171,16 @@
   }
   function tokenMatches(queryToken, itemToken, type) {
     if (queryToken === itemToken) return true;
-    // El reconocimiento de insumos en español suele confundir una consonante;
-    // tolerar una sola diferencia en palabras largas sin aceptar coincidencias vagas.
-    return type === 'insumo' && queryToken.length >= 8 && itemToken.length >= 8 && editDistance(queryToken, itemToken) <= 1;
+    const shortest = Math.min(queryToken.length, itemToken.length);
+    const distance = editDistance(queryToken, itemToken);
+    // Nombres: admite una diferencia para nombres medianos y hasta dos en apellidos largos.
+    // Insumos: admite una diferencia fonética en palabras largas, sin confundir categorías distintas.
+    if (type === 'trabajador') {
+      if (shortest >= 5 && distance <= 1) return true;
+      if (shortest >= 8 && distance <= 2) return true;
+    }
+    if (type === 'insumo' && shortest >= 8 && distance <= 1) return true;
+    return false;
   }
   function matchCatalogVoice(text, items, type) {
     const query = canonicalSpeech(text);
@@ -309,8 +321,9 @@
       const geo=gps.ok ? gps : await locate();
       if (!geo.ok) throw new Error('No se guardó. El GPS es obligatorio.');
       const uuid=(window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('finca-'+Date.now()+'-'+Math.random().toString(36).slice(2));
+      const capturedAt = new Date().toISOString();
       const record={
-        id:uuid,idCliente:uuid,createdAt:new Date().toISOString(),syncStatus:'pending',
+        id:uuid,idCliente:uuid,createdAt:capturedAt,fechaCaptura:capturedAt,syncStatus:'pending',
         fecha:$('fecha').value,empleado:$('empleado').value,empleadoNombre:getSelectedName($('empleado').value,catalog.empleados),
         labor:$('labor').value,laborNombre:getSelectedName($('labor').value,catalog.labores),
         caballon:qr,caballonNombre:cab.nombre,lote:cab.lote,horas:Number($('horas').value),matas:Number($('matas').value),

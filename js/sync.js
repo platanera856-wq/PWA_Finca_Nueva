@@ -4,6 +4,8 @@
     if (!navigator.onLine) throw new Error('No hay internet. El registro continúa guardado en este teléfono.');
     const payload = {
       idCliente: record.idCliente || record.id,
+      // La fecha/hora original del teléfono debe viajar con el registro offline.
+      fechaCaptura: record.fechaCaptura || record.createdAt || null,
       empleado: String(record.empleado),
       labor: String(record.labor),
       caballon: String(record.caballon),
