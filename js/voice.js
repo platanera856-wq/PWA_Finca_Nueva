@@ -5,6 +5,10 @@
   let welcomePlayed = false;
   let audioUnlocked = false;
   let firstVoiceListCheck = false;
+  // Mantener vivo un AudioContext iniciado durante un gesto real del usuario.
+  // En Android, contextos nuevos creados después de hablar pueden quedar suspendidos.
+  let localAudioContext = null;
+  let localAudioContextReady = Promise.resolve();
   const greetings = [
     'Gracias por su trabajo.',
     'Su labor es importante.',
@@ -25,10 +29,46 @@
   function supportsSpeechOutput() { return ('speechSynthesis' in window) && typeof SpeechSynthesisUtterance === 'function'; }
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  // Android/Chromium can drop the first utterance if speak() is called immediately
-  // after cancel(), or when the page has not received any user gesture. This silent
-  // unlock is called synchronously from the first touch; it adds no visible button.
+  // Crear/resumir el contexto de audio de entrada en el primer toque del usuario.
+  // Lo reutilizamos entre preguntas para no depender de crear AudioContext tras TTS.
+  function primeLocalAudioContext() {
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextCtor) return Promise.reject(new Error('Este navegador no permite procesar audio local.'));
+    try {
+      if (!localAudioContext || localAudioContext.state === 'closed') {
+        try { localAudioContext = new AudioContextCtor({ sampleRate: 16000 }); }
+        catch (_) { localAudioContext = new AudioContextCtor(); }
+      }
+      if (localAudioContext.state !== 'running') {
+        localAudioContextReady = localAudioContext.resume().catch(error => {
+          console.warn('No se pudo activar el contexto de audio:', error);
+        });
+      } else {
+        localAudioContextReady = Promise.resolve();
+      }
+      return localAudioContextReady;
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  async function getLocalAudioContext() {
+    await primeLocalAudioContext();
+    if (!localAudioContext || localAudioContext.state === 'closed') {
+      throw new Error('No se pudo activar el audio del micrófono. Toque la pantalla una vez y vuelva a probar.');
+    }
+    if (localAudioContext.state !== 'running') {
+      try { await localAudioContext.resume(); } catch (_) {}
+    }
+    if (localAudioContext.state !== 'running') {
+      throw new Error('El audio del micrófono está suspendido por el navegador. Toque la pantalla una vez y vuelva a probar.');
+    }
+    return localAudioContext;
+  }
+
+  // El mismo toque desbloquea síntesis y audio de entrada, sin crear botones nuevos.
   function unlockAudio() {
+    void primeLocalAudioContext().catch(error => console.warn('No se pudo preparar el audio local:', error));
     if (audioUnlocked || !supportsSpeechOutput()) return audioUnlocked;
     try {
       const synth = window.speechSynthesis;
@@ -251,7 +291,8 @@
         if (source) { try { source.disconnect(); } catch (_) {} }
         if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
         if (recognizer) { try { recognizer.remove(); } catch (_) {} }
-        if (audioContext && audioContext.state !== 'closed') { try { await audioContext.close(); } catch (_) {} }
+        // No cerrar el contexto compartido: Android puede suspender los contextos
+        // recién creados al comenzar una respuesta automática tras la pregunta.
         if (activeLocalSession && activeLocalSession.recognizer === recognizer) activeLocalSession = null;
       };
       const finish = (error, text) => {
@@ -261,7 +302,11 @@
         if (partialTimer) clearTimeout(partialTimer);
         void cleanup().then(() => {
           if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
-          else { status('Voz sin conexión lista.'); resolve(String(text || '').trim()); }
+          else {
+            const recognized = String(text || '').trim();
+            status(recognized ? 'Respuesta detectada sin internet: ' + recognized : 'No se detectaron palabras.');
+            resolve(recognized);
+          }
         });
       };
 
@@ -275,9 +320,7 @@
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 },
             video: false
           });
-          try { audioContext = new AudioContext({ sampleRate: 16000 }); }
-          catch (_) { audioContext = new AudioContext(); }
-          await audioContext.resume();
+          audioContext = await getLocalAudioContext();
           recognizer = new offlineModel.KaldiRecognizer();
           recognizer.on('result', message => {
             const text = String(message && message.result && message.result.text || '').trim();
@@ -288,6 +331,7 @@
             const partial = String(message && message.result && message.result.partial || '').trim();
             if (!partial) return;
             latestPartial = partial;
+            status('Escuchando sin internet… Se reconoce: ' + partial);
             if (partialTimer) clearTimeout(partialTimer);
             // Vosk liefert laufend partialresult. Wenn die Äußerung kurz pausiert,
             // darf die App eine stabile Teiltranskription verwenden, statt bis zum
@@ -316,7 +360,7 @@
           activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
           // Igual que con internet: el plazo completo para responder empieza solo
           // cuando el micrófono y el reconocedor están activos, no durante su arranque.
-          status('Escuchando sin internet…');
+          status('Escuchando sin internet… Hable ahora.');
           timer = setTimeout(() => {
             if (latestPartial) finish(null, latestPartial);
             else finish(new Error('No se escuchó una respuesta.'));
