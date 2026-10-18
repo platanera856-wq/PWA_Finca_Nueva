@@ -1,4 +1,4 @@
-const CACHE_NAME = 'finca-pwa-v031-flow-validacion';
+const CACHE_NAME = 'finca-pwa-v040-preguntas-automaticas';
 const CORE_ASSETS = [
   './', './index.html', './manifest.webmanifest', './css/app.css',
   './js/config.js', './js/api.js', './js/db.js', './js/voice.js',
