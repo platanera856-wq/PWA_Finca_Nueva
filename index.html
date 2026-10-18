@@ -22,6 +22,17 @@
     <p id="app-notice" class="notice" role="status" aria-live="polite"></p>
 
     <form id="record-form">
+      <!-- La cámara se muestra al principio de la pantalla, como en la app original. -->
+      <div id="qr-area" class="qr-panel">
+        <h3>1. Escanee el QR del caballón</h3>
+        <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
+        <p id="qr-status" class="note" aria-live="polite">Iniciando la cámara y el lector QR…</p>
+        <div class="actions">
+          <button type="button" id="qr-btn" class="secondary">Reintentar cámara / QR</button>
+          <button type="button" id="stop-camera" class="secondary">Cerrar cámara</button>
+        </div>
+      </div>
+      <h3>2. Datos de la labor</h3>
       <label>Fecha de la labor (se completa automáticamente)
         <input id="fecha" name="fecha" type="date" required>
       </label>
@@ -47,15 +58,10 @@
         <textarea id="observaciones" name="observaciones" rows="3" placeholder="Observaciones de la labor"></textarea>
       </label>
       <div class="actions">
-        <button type="button" id="voice-btn" class="secondary">🎙 Iniciar preguntas por voz</button>
-        <button type="button" id="qr-btn" class="secondary">▦ Reintentar cámara / QR</button>
+        <button type="button" id="voice-btn" class="secondary">🎙 Iniciar entrevista guiada</button>
+        <button type="button" id="dictate-field-btn" class="secondary">🎤 Dictar en el campo seleccionado</button>
       </div>
-      <p id="voice-status" class="note" aria-live="polite">Toque «Iniciar preguntas por voz» para habilitar el audio y el micrófono. El reconocimiento del navegador puede necesitar internet.</p>
-      <div id="qr-area" hidden>
-        <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
-        <p id="qr-status" class="note" aria-live="polite">Preparando lector QR…</p>
-        <button type="button" id="stop-camera" class="secondary">Cerrar cámara</button>
-      </div>
+      <p id="voice-status" class="note" aria-live="polite">Pulse «Iniciar entrevista guiada» una vez para autorizar el audio y el micrófono. Para dictar un campo concreto, tóquelo primero y luego pulse «Dictar en el campo seleccionado». El reconocimiento del navegador puede necesitar internet.</p>
       <button id="save-btn" class="primary" type="submit" disabled>Guardar registro</button>
     </form>
   </section>
