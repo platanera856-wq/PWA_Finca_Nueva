@@ -229,7 +229,7 @@
     return offlineModelPromise;
   }
 
-  function listenLocal(timeoutMs = 25000) {
+  function listenLocal(timeoutMs = 25000, acceptCandidate = null) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let mediaStream = null;
@@ -238,8 +238,15 @@
       let processor = null;
       let recognizer = null;
       let timer = null;
+      let partialTimer = null;
+      let latestPartial = '';
 
+      const candidateIsValid = text => {
+        if (typeof acceptCandidate !== 'function') return false;
+        try { return !!acceptCandidate(text); } catch (_) { return false; }
+      };
       const cleanup = async () => {
+        if (partialTimer) clearTimeout(partialTimer);
         if (processor) { try { processor.disconnect(); } catch (_) {} processor.onaudioprocess = null; }
         if (source) { try { source.disconnect(); } catch (_) {} }
         if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
@@ -251,20 +258,19 @@
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (partialTimer) clearTimeout(partialTimer);
         void cleanup().then(() => {
           if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
-          else { status('Voz sin conexión lista.'); resolve(text); }
+          else { status('Voz sin conexión lista.'); resolve(String(text || '').trim()); }
         });
       };
 
-      timer = setTimeout(() => finish(new Error('No se escuchó una respuesta.')), timeoutMs);
       (async () => {
         try {
           if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
             throw new Error('Este navegador no ofrece acceso al micrófono. Abra la aplicación segura de GitHub Pages en Chrome.');
           }
           if (!offlineModel) await prepareOffline();
-          status('Escuchando sin internet…');
           mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 },
             video: false
@@ -277,8 +283,24 @@
             const text = String(message && message.result && message.result.text || '').trim();
             if (text) finish(null, text);
           });
-          recognizer.on('partialresult', () => {
-            if (!settled) status('Escuchando sin internet…');
+          recognizer.on('partialresult', message => {
+            if (settled) return;
+            const partial = String(message && message.result && message.result.partial || '').trim();
+            if (!partial) return;
+            latestPartial = partial;
+            if (partialTimer) clearTimeout(partialTimer);
+            // Vosk liefert laufend partialresult. Wenn die Äußerung kurz pausiert,
+            // darf die App eine stabile Teiltranskription verwenden, statt bis zum
+            // Ende des gesamten Zeitfensters auf ein finales result zu warten.
+            partialTimer = setTimeout(() => {
+              if (settled || !latestPartial) return;
+              // Para nombres/labores/insumos, preferir un parcial que ya coincida
+              // con el catálogo. Si aún no coincide, seguir escuchando hasta el
+              // resultado final o hasta agotar los mismos 30 s que usa el modo online.
+              if (typeof acceptCandidate !== 'function' || candidateIsValid(latestPartial)) {
+                finish(null, latestPartial);
+              }
+            }, 1400);
           });
           source = audioContext.createMediaStreamSource(mediaStream);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -286,13 +308,19 @@
             if (settled || !recognizer) return;
             try { recognizer.acceptWaveform(event.inputBuffer); }
             catch (error) { console.error('Vosk acceptWaveform:', error); }
-            // La salida se silencia; el trabajador solo necesita que el micrófono quede procesado.
             const output = event.outputBuffer;
             if (output) for (let channel = 0; channel < output.numberOfChannels; channel++) output.getChannelData(channel).fill(0);
           };
           source.connect(processor);
           processor.connect(audioContext.destination);
           activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
+          // Igual que con internet: el plazo completo para responder empieza solo
+          // cuando el micrófono y el reconocedor están activos, no durante su arranque.
+          status('Escuchando sin internet…');
+          timer = setTimeout(() => {
+            if (latestPartial) finish(null, latestPartial);
+            else finish(new Error('No se escuchó una respuesta.'));
+          }, timeoutMs);
         } catch (error) {
           let message = error && error.message ? error.message : String(error || 'Error del micrófono.');
           if (error && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')) message = 'El micrófono está bloqueado. En Chrome, permita el micrófono para este sitio y vuelva a probar.';
@@ -400,7 +428,7 @@
         const message = String(error && error.message || error || '');
         if (/necesita internet|network|conexión.*reconocimiento/i.test(message) && offlineModel) {
           console.warn('Falló el servicio conectado; se probará Vosk local:', error);
-          return listenLocal(timeoutMs);
+          return listenLocal(timeoutMs, acceptCandidate);
         }
         throw error;
       }
@@ -408,7 +436,7 @@
 
     if (offlineModel || window.Vosk) {
       if (!offlineModel) await prepareOffline();
-      return listenLocal(timeoutMs);
+      return listenLocal(timeoutMs, acceptCandidate);
     }
     if (!navigator.onLine) throw new Error('El reconocimiento local no está preparado. Conéctese una vez y espere a que la voz sin conexión quede lista.');
     throw new Error('Este navegador no ofrece reconocimiento de voz conectado y el motor local no está listo.');
