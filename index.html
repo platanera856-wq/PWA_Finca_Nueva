@@ -1,56 +1,76 @@
 <!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#245b35">
-<meta name="description" content="Registro de labores agrícolas con soporte local sin conexión.">
-<link rel="manifest" href="./manifest.webmanifest">
-<link rel="stylesheet" href="./css/app.css">
-<title>Registro de labores — Finca</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#245b35">
+  <meta name="description" content="Registro de labores agrícolas, catálogos de la finca y almacenamiento local.">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="stylesheet" href="./css/app.css">
+  <title>Registro de labores — Finca</title>
 </head>
 <body>
-<header class="top"><div><p class="eyebrow">FINCA · REGISTROS</p><h1>Registro de labores</h1></div><span id="network" class="status">Comprobando conexión…</span></header>
+<header class="top">
+  <div><p class="eyebrow">FINCA · REGISTROS</p><h1>Registro de labores</h1></div>
+  <span id="network" class="status">Comprobando conexión…</span>
+</header>
 <main>
-<section class="panel">
-  <h2>Nuevo registro</h2>
-  <p class="note">Los registros se guardan primero en este teléfono, incluso sin internet.</p>
-  <form id="record-form">
-    <label>Fecha<input name="fecha" type="date" required></label>
-    <label>Trabajador<input name="trabajador" autocomplete="name" required placeholder="Nombre del trabajador"></label>
-    <label>Labor realizada<input name="labor" required placeholder="Ej. Deshoje"></label>
-    <label>Caballón / lote<input name="caballon" required placeholder="Código o nombre"></label>
-    <label>Plantas trabajadas<input name="plantas" inputmode="numeric" type="number" min="0" step="1" required></label>
-    <label>Insumo (si aplica)<input name="insumo" placeholder="Nombre del insumo"></label>
-    <label>Cantidad de insumo<input name="cantidadInsumo" inputmode="decimal" type="number" min="0" step="any"></label>
-    <label>Observaciones<textarea name="observaciones" rows="3" placeholder="Observaciones de la labor"></textarea></label>
-    <div class="actions">
-      <button type="button" id="voice-btn" class="secondary">🎙 Dictar en el campo seleccionado</button>
-      <button type="button" id="qr-btn" class="secondary">▦ Reintentar cámara / QR</button>
-    </div>
-    <p id="voice-status" class="note" aria-live="polite">Se intentará dar la bienvenida por voz. Para dictar, seleccione un campo y pulse el botón de voz. El dictado del navegador puede requerir internet.</p>
-    <div id="qr-area" hidden>
-      <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
-      <p id="qr-status" class="note" aria-live="polite">La aplicación intentará iniciar la cámara al abrirse.</p>
-      <button type="button" id="stop-camera" class="secondary">Cerrar cámara</button>
-    </div>
-    <button class="primary" type="submit">Guardar en este teléfono</button>
-  </form>
-</section>
-<section class="panel">
-  <div class="list-head"><h2>Registros de este teléfono</h2><span id="pending-count" class="count">0</span></div>
-  <p class="note">Pendientes de sincronización. La conexión con Sheets se habilitará después de verificar el contrato del Apps Script.</p>
-  <div id="records" class="records"><p class="note">Cargando registros…</p></div>
-  <button id="export-btn" class="secondary">Exportar copia JSON</button>
-</section>
-<section class="panel">
-  <h2>Google Sheets</h2>
-  <p id="sync-status" class="note">Sin configurar. No se han enviado datos a Google Sheets.</p>
-  <button id="sync-btn" class="secondary" disabled>Sincronizar (pendiente de configuración)</button>
-</section>
+  <section class="panel">
+    <h2>Nuevo registro</h2>
+    <p class="note">Los trabajadores, labores, insumos y caballones se cargan desde Apps Script cuando hay internet y se conservan en este teléfono para su uso posterior.</p>
+    <p id="catalog-status" class="note" aria-live="polite">Conectando con Google Apps Script para cargar los catálogos…</p>
+    <p id="app-notice" class="notice" role="status" aria-live="polite"></p>
+
+    <form id="record-form">
+      <label>Fecha de la labor (se completa automáticamente)
+        <input id="fecha" name="fecha" type="date" required>
+      </label>
+      <label>Trabajador
+        <select id="empleado" name="empleado" required disabled><option value="">Cargando trabajadores…</option></select>
+      </label>
+      <label>Labor realizada
+        <select id="labor" name="labor" required disabled><option value="">Cargando labores…</option></select>
+      </label>
+      <label>Caballón / lote (lo llena el lector QR)
+        <input id="caballon" name="caballon" required placeholder="Esperando lectura del QR…" autocomplete="off">
+      </label>
+      <p id="caballon-detail" class="field-status" aria-live="polite">La cámara intenta abrirse al entrar; si el navegador lo bloquea, pulse «Reintentar cámara / QR».</p>
+      <label>Horas trabajadas (de 0,5 a 8)
+        <input id="horas" name="horas" type="number" min="0.5" max="8" step="0.5" inputmode="decimal" required>
+      </label>
+      <label>Plantas trabajadas
+        <input id="matas" name="matas" type="number" min="1" step="1" inputmode="numeric" required>
+      </label>
+      <div class="list-head"><h2>Insumos utilizados (opcional)</h2><button type="button" id="add-insumo" class="secondary">+ Añadir insumo</button></div>
+      <div id="insumos-container"></div>
+      <label>Observaciones
+        <textarea id="observaciones" name="observaciones" rows="3" placeholder="Observaciones de la labor"></textarea>
+      </label>
+      <div class="actions">
+        <button type="button" id="voice-btn" class="secondary">🎙 Iniciar preguntas por voz</button>
+        <button type="button" id="qr-btn" class="secondary">▦ Reintentar cámara / QR</button>
+      </div>
+      <p id="voice-status" class="note" aria-live="polite">Toque «Iniciar preguntas por voz» para habilitar el audio y el micrófono. El reconocimiento del navegador puede necesitar internet.</p>
+      <div id="qr-area" hidden>
+        <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
+        <p id="qr-status" class="note" aria-live="polite">Preparando lector QR…</p>
+        <button type="button" id="stop-camera" class="secondary">Cerrar cámara</button>
+      </div>
+      <button id="save-btn" class="primary" type="submit" disabled>Guardar registro</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <div class="list-head"><h2>Registros de este teléfono</h2><span id="pending-count" class="count">0</span></div>
+    <p class="note">Los registros se guardan primero en el teléfono. Al recuperar internet se intentará enviarlos a Google Sheets.</p>
+    <div id="records" class="records"><p class="note">Cargando registros locales…</p></div>
+    <div class="actions"><button id="sync-btn" type="button" class="secondary">Sincronizar pendientes</button><button id="export-btn" type="button" class="secondary">Exportar copia JSON</button></div>
+    <p id="sync-status" class="note" aria-live="polite">Preparando sincronización…</p>
+  </section>
 </main>
-<footer>Versión de prueba · Compruebe cámara y voz antes de usar en la finca.</footer>
+<footer>Versión conectada de prueba. No use en producción sin verificar registros en Google Sheets.</footer>
 <script src="./js/config.js"></script>
+<script src="./js/api.js"></script>
 <script src="./js/db.js"></script>
 <script src="./js/voice.js"></script>
 <script src="./js/html5-qrcode.min.js"></script>

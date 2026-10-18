@@ -1,11 +1,12 @@
 {
-  "name": "Registro de labores agrícolas",
-  "short_name": "Labores Finca",
-  "lang": "es-CO",
+  "name": "Registro de labores — Finca",
+  "short_name": "Registro Finca",
+  "description": "Registro agrícola con catálogos, QR y almacenamiento local.",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#f4f6f1",
   "theme_color": "#245b35",
-  "description": "Registro local de labores agrícolas."
+  "lang": "es-CO"
 }
