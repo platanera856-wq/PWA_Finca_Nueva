@@ -11,6 +11,55 @@
   let qrAlreadyLaunched = '';
   let cameraRestartPending = false;
   let voiceProgress = { insumosDone: false, observationsDone: false };
+  // Mantener la pantalla encendida durante toda la entrevista, para que Android
+  // no suspenda el micrófono ni salte a la siguiente pregunta.
+  let screenWakeLock = null;
+  let wakeLockRequestPending = false;
+  let wakeLockFallbackNotified = false;
+  async function holdScreenAwake() {
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
+      if (interviewRunning && !wakeLockFallbackNotified) {
+        wakeLockFallbackNotified = true;
+        showNotice('Este navegador no permite mantener la pantalla encendida. Para evitar que se interrumpa la voz, mantenga la PWA en primer plano y aumente temporalmente el tiempo de bloqueo de pantalla del teléfono.', 'info');
+      }
+      return false;
+    }
+    if (document.visibilityState !== 'visible') return false;
+    if (screenWakeLock && !screenWakeLock.released) return true;
+    if (wakeLockRequestPending) return false;
+    wakeLockRequestPending = true;
+    try {
+      screenWakeLock = await navigator.wakeLock.request('screen');
+      screenWakeLock.addEventListener('release', () => {
+        screenWakeLock = null;
+        // Android puede liberar el bloqueo al cambiar de aplicación o apagar
+        // la pantalla; volver a pedirlo cuando la PWA esté visible.
+        if (interviewRunning && document.visibilityState === 'visible') {
+          window.setTimeout(() => { void holdScreenAwake(); }, 300);
+        }
+      }, { once: true });
+      return true;
+    } catch (error) {
+      console.warn('No se pudo mantener activa la pantalla durante la entrevista:', error);
+      if (interviewRunning && !wakeLockFallbackNotified) {
+        wakeLockFallbackNotified = true;
+        showNotice('Android no permitió mantener la pantalla activa. Mantenga la PWA en primer plano y aumente temporalmente el tiempo de bloqueo de pantalla del teléfono.', 'info');
+      }
+      return false;
+    } finally {
+      wakeLockRequestPending = false;
+    }
+  }
+  async function releaseScreenAwake() {
+    const lock = screenWakeLock;
+    screenWakeLock = null;
+    if (lock && !lock.released) {
+      try { await lock.release(); } catch (_) {}
+    }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (interviewRunning && document.visibilityState === 'visible') void holdScreenAwake();
+  });
 
   function showNotice(text, kind = 'info') {
     const el = $('app-notice');
@@ -96,10 +145,31 @@
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj)\b/g,'deshoje');
     s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
+    // Variantes fonéticas frecuentes de reconocimiento de «insecticida».
+    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas)\b/g, match => match === 'insecticidas' ? 'insecticida' : 'insecticida');
     return s;
   }
   const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor']);
   function meaningfulTokens(text) { return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t)); }
+  function editDistance(a, b) {
+    if (a === b) return 0;
+    if (Math.abs(a.length - b.length) > 2) return 99;
+    let previous = Array.from({length:b.length + 1}, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const current = [i];
+      for (let j = 1; j <= b.length; j++) {
+        current[j] = Math.min(current[j - 1] + 1, previous[j] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      previous = current;
+    }
+    return previous[b.length];
+  }
+  function tokenMatches(queryToken, itemToken, type) {
+    if (queryToken === itemToken) return true;
+    // El reconocimiento de insumos en español suele confundir una consonante;
+    // tolerar una sola diferencia en palabras largas sin aceptar coincidencias vagas.
+    return type === 'insumo' && queryToken.length >= 8 && itemToken.length >= 8 && editDistance(queryToken, itemToken) <= 1;
+  }
   function matchCatalogVoice(text, items, type) {
     const query = canonicalSpeech(text);
     if (!query || !items || !items.length) return null;
@@ -125,11 +195,15 @@
     for (const item of items) {
       let itemTokens = meaningfulTokens(item.nombre);
       if (type === 'labor' && /deshoj|deshoje|desoj/.test(canonicalSpeech(text))) itemTokens = itemTokens.map(t => /deshoj|desoj/.test(t) ? 'deshoje' : t);
-      const hit = itemTokens.filter(t => queryTokens.has(t));
+      const queryList = [...queryTokens];
+      const hit = itemTokens.filter(t => queryList.some(q => tokenMatches(q, t, type)));
       if (!hit.length) continue;
       let score = 0;
-      for (const term of new Set(hit)) score += termFrequency[term] === 1 ? 10 : 1;
-      if (itemTokens.length > 0 && itemTokens.every(t => queryTokens.has(t))) score += 20;
+      for (const term of new Set(hit)) score += (termFrequency[term] || 0) === 1 ? 10 : 1;
+      if (itemTokens.length > 0 && itemTokens.every(t => queryList.some(q => tokenMatches(q, t, type)))) score += 20;
+      // La coincidencia fonética aproximada tiene menos peso que la exacta.
+      const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
+      score += exactHitCount * 3;
       ranked.push({item,score});
     }
     ranked.sort((a,b)=>b.score-a.score);
@@ -382,6 +456,8 @@
       showNotice(message,'error'); FincaVoice.status(message); return;
     }
     interviewRunning=true; autoVoicePending=false; updateSaveButton();
+    // Pedir el bloqueo antes de preparar el modelo y empezar la entrevista.
+    void holdScreenAwake();
     try {
       // No comenzar a preguntar hasta preparar el reconocimiento local. En la primera
       // apertura conectada esto descarga y guarda el modelo español; después sirve sin internet.
@@ -435,7 +511,9 @@
         showNotice((error.message || 'Voz bloqueada.') + ' Toque una vez la pantalla para volver a intentar.', 'error');
       }
     } finally {
-      interviewRunning=false; updateSaveButton();
+      interviewRunning=false;
+      await releaseScreenAwake();
+      updateSaveButton();
       if (cameraRestartPending && window.FincaCamera) {
         cameraRestartPending=false; window.setTimeout(()=>void window.FincaCamera.start(),500);
       }
