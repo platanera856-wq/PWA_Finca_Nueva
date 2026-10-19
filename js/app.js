@@ -15,7 +15,7 @@
   let wakeLockRequestPending = false;
   let wakeLockFallbackNotified = false;
 
-  // NUEVO: Gramática exacta y estricta para los números
+  // Gramática estricta y fonética para números
   const NUMBER_GRAMMAR = [
     'cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez',
     'once','doce','trece','catorce','quince','dieciseis','diecisiete','dieciocho','diecinueve','veinte',
@@ -154,12 +154,17 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
+  // MEJORA: Normalizar "ka ce ele" a "kcl" y limpiar fonética
   function canonicalSpeech(text) {
     let s = normalize(text);
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
-    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bkcloruro\b|\bka cloruro\b/g,'kcl');
+    
+    // Convertir "ka ce ele", "ka se le", "ca ce le" a KCl
+    s = s.replace(/\b(ka|ca)\s+(ce|se|ze)\s+(ele|le|cle)\b/g, 'kcl');
+    s = s.replace(/\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
+    
     s = s.replace(/z/g, 's');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
     s = s.replace(/\b(h)([aeiou])/g, '$2'); 
@@ -250,19 +255,46 @@
     return ranked[0].item;
   }
 
-  // NUEVO: Gramática estricta que lee SOLO los nombres exactos del Excel
+  // MEJORA: Gramática fonética inteligente
   function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
       const originalName = String(item && item.nombre || '').trim();
-      if (originalName) {
-        phrases.add(originalName);
-        phrases.add(originalName.toLowerCase());
+      if (!originalName) continue;
+      
+      const base = originalName.toLowerCase();
+      phrases.add(base);
+
+      // 1. Quitar la 'h' muda (herbicida -> erbicida)
+      let sinH = base.replace(/^h/, '').replace(/\sh/g, ' ');
+      if (sinH !== base) phrases.add(sinH);
+
+      // 2. Cambiar 'c' por 's' (insecticida -> insestisida)
+      let conS = base.replace(/c/g, 's').replace(/z/g, 's');
+      if (conS !== base) phrases.add(conS);
+
+      // 3. Cambiar 'v' por 'b' (uva -> uba)
+      let conB = base.replace(/v/g, 'b');
+      if (conB !== base) phrases.add(conB);
+
+      // 4. Separar palabras que terminan en "icida" o "ida" para forzar la primera sílaba
+      if (base.endsWith('icida')) {
+        const root = base.slice(0, -5);
+        phrases.add(root + ' icida');
+        phrases.add(root + ' isida');
+        phrases.add(root + 'i cida');
+      }
+
+      // 5. Acrónimo KCl (deletreado)
+      if (base === 'kcl') {
+        phrases.add('ka ce ele'); phrases.add('ka se le'); phrases.add('ca ce le'); phrases.add('ka cl');
+      }
+
+      // 6. Labor Deshoje
+      if (type === 'labor' && /deshoj|desoj/.test(base)) {
+        phrases.add('de soje'); phrases.add('desoje');
       }
     }
-    if (type === 'insumo') phrases.add('herbicida');
-    if (type === 'labor') phrases.add('deshoje');
-    
     phrases.add('[unk]');
     return [...phrases]; 
   }
@@ -461,7 +493,6 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
-        // Usar la gramática de números exacta
         const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {kind:'number', grammarPhrases: NUMBER_GRAMMAR});
         const value=FincaVoice.parseNumber(answer);
         if (value!==null && Number.isFinite(value) && validator(value)) {
