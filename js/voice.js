@@ -203,7 +203,6 @@
         offlineModel = await window.Vosk.createModel(archiveObjectUrl);
         if (!offlineModel || typeof offlineModel.KaldiRecognizer !== 'function') throw new Error('El motor no devolvió un reconocedor válido.');
         
-        // Prueba real para asegurar que el modelo no falle en frío
         status('Verificando que el modelo responda sin internet…');
         const testRecognizer = new offlineModel.KaldiRecognizer(16000);
         if (!testRecognizer) throw new Error('El modelo descargado no pudo iniciar el reconocedor.');
@@ -305,7 +304,6 @@
             if (partialTimer) clearTimeout(partialTimer);
             latestPartial = '';
             
-            // Filtrar alucinaciones (ej. "alim perro")
             if (typeof acceptCandidate === 'function' && !candidateIsValid(text)) {
                status('No coincide con la lista. Escuchando de nuevo…');
                return; 
@@ -325,10 +323,18 @@
             if (!partial || partial.includes('[unk]')) return;
             latestPartial = partial;
             if (oneWordTimer) { clearTimeout(oneWordTimer); oneWordTimer = null; }
+            
+            // NUEVO ARREGLO: Validar el parcial ANTES de mostrarlo o usarlo
+            if (typeof acceptCandidate === 'function' && !candidateIsValid(partial)) {
+               status('Escuchando sin internet… (procesando)');
+               return; 
+            }
+
             status('Escuchando sin internet… Se reconoce: ' + partial);
             if (partialTimer) clearTimeout(partialTimer);
             partialTimer = setTimeout(() => {
               if (settled || !latestPartial) return;
+              if (typeof acceptCandidate === 'function' && !candidateIsValid(latestPartial)) return;
               finish(null, latestPartial);
             }, partialSettleMs(partial));
           });
