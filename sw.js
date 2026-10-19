@@ -1,5 +1,5 @@
-const CACHE_NAME = 'finca-pwa-v052-voz-local'; // Versión actualizada
-const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v2';
+const CACHE_NAME = 'finca-pwa-v053-voz-local'; // Versión actualizada
+const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v3';
 const VOSK_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js?v=051';
 const VOSK_PACKAGE_PREFIX = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/';
 
@@ -38,7 +38,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter(k => (k.startsWith('finca-pwa-') && k !== CACHE_NAME) || k === 'finca-voice-model-cache-v1').map(k => caches.delete(k)));
+    await Promise.all(keys.filter(k => (k.startsWith('finca-pwa-') && k !== CACHE_NAME) || k === 'finca-voice-model-cache-v2').map(k => caches.delete(k)));
     await self.clients.claim();
   })());
 });
