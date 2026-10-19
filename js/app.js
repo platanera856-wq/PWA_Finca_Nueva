@@ -108,10 +108,13 @@
     updateSaveButton();
   }
 
-  // ARREGLO: Lee correctamente los decimales de Excel (convierte coma a punto)
+  // BLINDAJE: Lee la columna "CantidadDisponible" del Excel y maneja comas
   function getDisponible(item) {
-    if (!item || item.disponible === undefined || item.disponible === null) return 0;
-    return parseFloat(String(item.disponible).replace(',', '.')) || 0;
+    if (!item) return 0;
+    const rawVal = item.CantidadDisponible !== undefined ? item.CantidadDisponible :
+                   item.disponible !== undefined ? item.disponible :
+                   item.stock !== undefined ? item.stock : 0;
+    return parseFloat(String(rawVal).replace(',', '.')) || 0;
   }
 
   function renderInsumoStockText() {
@@ -192,6 +195,7 @@
     }
     return false;
   }
+
   function matchCatalogVoice(text, items, type) {
     const query = canonicalSpeech(text);
     if (!query || !items || !items.length) return null;
@@ -218,11 +222,18 @@
       const queryList = [...queryTokens];
       const hit = itemTokens.filter(t => queryList.some(q => tokenMatches(q, t, type)));
       if (!hit.length) continue;
+      
       let score = 0;
       for (const term of new Set(hit)) score += (termFrequency[term] || 0) === 1 ? 10 : 1;
       if (itemTokens.length > 0 && itemTokens.every(t => queryList.some(q => tokenMatches(q, t, type)))) score += 20;
       const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
       score += exactHitCount * 3;
+
+      // Penalización por alucinaciones (Ej. "alim perro")
+      const unmatchedQueryTokens = queryList.filter(q => !itemTokens.some(t => tokenMatches(q, t, type)));
+      score -= unmatchedQueryTokens.length * 25; 
+
+      if (score < 10) continue;
       ranked.push({item,score});
     }
     ranked.sort((a,b)=>b.score-a.score);
@@ -301,6 +312,7 @@
   function validLabor() { return catalog.labores.some(x=>String(x.id)===String($('labor').value)); }
   function validHours() { const n=Number($('horas').value); return $('horas').value!=='' && Number.isFinite(n) && n>=0.5 && n<=8; }
   function validPlants() { const n=Number($('matas').value); return $('matas').value!=='' && Number.isInteger(n) && n>0; }
+  
   function getInsumosPayload() {
     const rows=[...document.querySelectorAll('.insumo-row')], items=[], totals={};
     for (const row of rows) {
@@ -346,8 +358,15 @@
       if (!cab) throw new Error('Escanee un QR válido de la finca.');
       if (!validEmployee()) throw new Error('Seleccione un trabajador de la lista.');
       if (!validLabor()) throw new Error('Seleccione una labor de la lista.');
-      if (!validHours()) throw new Error('Las horas deben estar entre 0,5 y 8.');
+      if (!validHours()) throw new Error('Las horas deben ser entre 0,5 y 8, con pasos de media hora.');
       if (!validPlants()) throw new Error('Las plantas deben ser un número entero mayor que cero.');
+      
+      // BLINDAJE: Validar contra PlantasPorCaballon exacto del Excel
+      const maxPlantas = Number(cab.PlantasPorCaballon || cab.plantasPorCaballon || cab.plantas || cab.matas || 9999);
+      if (Number($('matas').value) > maxPlantas) {
+        throw new Error(`El caballón ${cab.nombre} solo tiene ${maxPlantas} plantas.`);
+      }
+
       const insumos=getInsumosPayload();
       const geo=gps.ok ? gps : await locate();
       if (!geo.ok) throw new Error('No se guardó. El GPS es obligatorio.');
@@ -441,9 +460,9 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
+        // BLINDAJE: Sin gramática restrictiva para permitir "ciento cincuenta" (150)
         const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {
-            kind:'number',
-            grammarPhrases: ['cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez','media','medio','coma','punto','[unk]']
+            kind:'number'
         });
         const value=FincaVoice.parseNumber(answer);
         if (value!==null && Number.isFinite(value) && validator(value)) {
@@ -518,8 +537,27 @@
       if (!voiceGreetingOk) { autoVoicePending=true; throw new Error('El navegador bloqueó el audio. Toque la pantalla una vez para activar la voz.'); }
       if (!validEmployee()) await askCatalogChoice('¿Trabajador?',catalog.empleados,$('empleado'),'trabajador');
       if (!validLabor()) await askCatalogChoice('¿Labor?',catalog.labores,$('labor'),'labor');
-      if (!validHours()) await askNumber('¿Cuántas horas?', $('horas'), n=>n>=0.5&&n<=8, 'Horas de 0,5 a 8. ¿Cuántas horas?', 'horas');
-      if (!validPlants()) await askNumber('¿Cuántas plantas?', $('matas'), n=>Number.isInteger(n)&&n>0, 'Diga un número entero de plantas. ¿Cuántas plantas?', 'plantas');
+      
+      // BLINDAJE: Regla de horas (0.5 a 8 en pasos de 0.5)
+      if (!validHours()) {
+        await askNumber('¿Cuántas horas?', $('horas'), 
+          n => n >= 0.5 && n <= 8 && (n * 2) % 1 === 0, 
+          'Horas de 0,5 a 8. Diga por ejemplo tres y media, o cuatro. ¿Cuántas horas?', 
+          'horas'
+        );
+      }
+      
+      // BLINDAJE: Regla de plantas (máximo el valor de la columna PlantasPorCaballon)
+      if (!validPlants()) {
+        const cab = matchCaballon($('caballon').value.trim());
+        const maxPlantas = cab ? (Number(cab.PlantasPorCaballon) || Number(cab.plantasPorCaballon) || Number(cab.plantas) || Number(cab.matas) || 9999) : 9999;
+        await askNumber(`¿Cuántas plantas trabajó? (El caballón tiene ${maxPlantas})`, $('matas'), 
+          n => Number.isInteger(n) && n > 0 && n <= maxPlantas, 
+          `El caballón solo tiene ${maxPlantas} plantas. ¿Cuántas plantas trabajó?`, 
+          'plantas'
+        );
+      }
+
       if (!voiceProgress.insumosDone) {
         const completeRow=[...document.querySelectorAll('.insumo-row')].some(row=>{
           const id=row.querySelector('.insumo-select').value, raw=row.querySelector('.insumo-qty').value;
