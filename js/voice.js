@@ -113,7 +113,7 @@
   }
 
   const VOSK_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js';
-  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v2';
+  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v3';
   const VOICE_MODEL_KEY = new URL('./models/vosk-model-small-es-0.42.tar.gz', location.href).href;
   const VOICE_MODEL_PARTS = ['./vosk-model-small-es-0.42.part01', './vosk-model-small-es-0.42.part02'];
   const VOICE_MODEL_BYTES = 39817091;
@@ -151,7 +151,7 @@
 
   async function ensureVoskRuntimeCached() {
     if (!('caches' in window)) throw new Error('El navegador no permite guardar el motor de voz en el teléfono.');
-    const cache = await caches.open('finca-pwa-v052-voz-local');
+    const cache = await caches.open('finca-pwa-v053-voz-local');
     const cached = await cache.match(VOSK_SCRIPT_URL);
     if (cached) return true;
     if (!navigator.onLine) throw new Error('La biblioteca Vosk no está guardada en este teléfono. Abra la aplicación con internet para completar la preparación de voz.');
@@ -224,6 +224,29 @@
       throw error;
     }).finally(() => { offlineModelPromise = null; });
     return offlineModelPromise;
+  }
+
+  // NUEVO: Función matemática para convertir el audio de Android (48kHz) a la velocidad de Vosk (16kHz)
+  function downsampleBuffer(buffer, sampleRate, outSampleRate) {
+    if (outSampleRate === sampleRate) return buffer;
+    if (outSampleRate > sampleRate) return buffer;
+    var sampleRateRatio = sampleRate / outSampleRate;
+    var newLength = Math.round(buffer.length / sampleRateRatio);
+    var result = new Float32Array(newLength);
+    var offsetResult = 0;
+    var offsetBuffer = 0;
+    while (offsetResult < result.length) {
+      var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+      var accum = 0, count = 0;
+      for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+        accum += buffer[i];
+        count++;
+      }
+      result[offsetResult] = accum / count;
+      offsetResult++;
+      offsetBuffer = nextOffsetBuffer;
+    }
+    return result;
   }
 
   function listenLocal(timeoutMs = 25000, acceptCandidate = null, options = {}) {
@@ -339,12 +362,29 @@
           
           source = audioContext.createMediaStreamSource(mediaStream);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
+          
           processor.onaudioprocess = event => {
             if (settled || !recognizer) return;
-            try { recognizer.acceptWaveform(event.inputBuffer); } catch (error) { console.error('Vosk acceptWaveform:', error); }
+            
+            const inputBuffer = event.inputBuffer;
+            const originalBuffer = inputBuffer.getChannelData(0);
+            
+            // Usamos el resampler para forzar 16kHz (Arregla el "Efecto Pitufo")
+            const resampled = downsampleBuffer(originalBuffer, inputBuffer.sampleRate, 16000);
+            
+            const fakeBuffer = {
+              length: resampled.length,
+              numberOfChannels: 1,
+              sampleRate: 16000,
+              getChannelData: () => resampled
+            };
+            
+            try { recognizer.acceptWaveform(fakeBuffer); } catch (error) { console.error('Vosk acceptWaveform:', error); }
+            
             const output = event.outputBuffer;
             if (output) for (let channel = 0; channel < output.numberOfChannels; channel++) output.getChannelData(channel).fill(0);
           };
+          
           source.connect(processor);
           processor.connect(audioContext.destination);
           activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
