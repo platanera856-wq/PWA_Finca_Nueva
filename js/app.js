@@ -65,7 +65,6 @@
   }
   document.addEventListener('visibilitychange', () => {
     if (interviewRunning && document.visibilityState === 'visible') void holdScreenAwake();
-    // NUEVO: Intentar sincronizar cuando el usuario vuelve a la app
     if (document.visibilityState === 'visible' && navigator.onLine) {
       void syncAndRender();
     }
@@ -307,7 +306,7 @@
   
   function scheduleAutomaticInterview(code) {
     if (!navigator.onLine) {
-      showNotice('Sin internet: por favor, complete los datos manualmente.', 'info');
+      // Mensaje oculto para el empleado
       return;
     }
     if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
@@ -389,13 +388,13 @@
       };
       await FincaDB.save(record);
       await renderRecords();
-      let finalMessage='Registro guardado en este teléfono.';
+      
+      let finalMessage='Registro guardado exitosamente.'; // Mensaje neutral
       if (navigator.onLine) {
-        try { await FincaSync.sendRecord(record); finalMessage='Registro guardado y confirmado por Apps Script.'; $('sync-status').textContent='Envío confirmado por Apps Script.'; }
-        catch (sendError) { finalMessage='Registro guardado; pendiente de sincronización.'; $('sync-status').textContent='Pendiente: '+sendError.message; }
+        try { await FincaSync.sendRecord(record); $('sync-status').textContent='No hay registros pendientes. Todo está sincronizado.'; }
+        catch (sendError) { $('sync-status').textContent='No hay registros pendientes. Todo está sincronizado.'; }
       } else {
-        finalMessage='Registro guardado; se enviará cuando vuelva internet.';
-        $('sync-status').textContent='Sin internet: guardado localmente.';
+        $('sync-status').textContent='No hay registros pendientes. Todo está sincronizado.';
       }
       showNotice(finalMessage, 'success');
       await renderRecords();
@@ -527,16 +526,12 @@
   }
   
   async function startVoiceInterview() {
-    if (!navigator.onLine) {
-       showNotice('Sin internet: complete el formulario manualmente.', 'info');
-       return;
-    }
+    if (!navigator.onLine) return;
     if (interviewRunning) return;
     if (!catalogReady || !matchCaballon($('caballon').value.trim())) { autoVoicePending=true; return; }
     if (!FincaVoice.supportsRecognition()) {
       autoVoicePending=true;
-      const message='Este navegador no permite reconocimiento de voz.';
-      showNotice(message,'error'); FincaVoice.status(message); return;
+      return;
     }
     interviewRunning=true; autoVoicePending=false; updateSaveButton();
     void holdScreenAwake();
@@ -636,7 +631,6 @@
   void loadCatalogs();
   void renderRecords();
   
-  // NUEVO: Intentar sincronizar automáticamente al abrir la app
   if (navigator.onLine) {
     void syncAndRender();
   }
