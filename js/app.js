@@ -244,44 +244,42 @@
   // El reconocedor local puede recibir una lista de frases esperadas para darles
   // prioridad. Siempre se incluye [unk] como salida alternativa y solo se incluyen
   // nombres reales del catálogo más variantes de pronunciación conocidas.
-  function buildVoiceGrammar(items, type) {
+    function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
-      const name = String(item && item.nombre || '').trim();
-      if (!name) continue;
-      phrases.add(name);
-      const canonical = canonicalSpeech(name);
-      if (type === 'trabajador') {
-        if (/\belkin\b/.test(canonical)) {
-          phrases.add(name.replace(/elkin/i, 'Elquin'));
-          phrases.add(name.replace(/elkin/i, 'Elkin'));
-        }
-        if (/\bflorez\b/.test(canonical)) phrases.add(name.replace(/florez/i, 'Flores'));
-        if (/\brestrepo\b/.test(canonical)) {
-          phrases.add(name.replace(/restrepo/i, 'Restrebo'));
-          phrases.add(name.replace(/restrepo/i, 'res trepo'));
-        }
+      const originalName = String(item && item.nombre || '').trim();
+      if (!originalName) continue;
+      
+      phrases.add(originalName);
+      
+      const words = originalName.split(/\s+/);
+      for (const word of words) {
+        if (word.length > 2) phrases.add(word); 
       }
-      if (type === 'insumo') {
-        if (/\bcodornaza\b/.test(canonical)) {
-          phrases.add(name.replace(/codornaza/i, 'Codornasa'));
-          phrases.add(name.replace(/codornaza/i, 'codor nasa'));
-        }
-        if (/\bgallinaza\b/.test(canonical)) {
-          phrases.add(name.replace(/gallinaza/i, 'Gallinasa'));
-          phrases.add(name.replace(/gallinaza/i, 'galli nasa'));
-        }
-        if (/\binsecticida\b/.test(canonical)) phrases.add(name.replace(/insecticida/i, 'Inseticida'));
-      }
-      if (type === 'labor' && /deshoj|deshoje/.test(canonical)) {
-        phrases.add(name.replace(/deshoje/i, 'Desoje'));
-        phrases.add(name.replace(/deshoje/i, 'Deshoj'));
-      }
-    }
-    phrases.add('[unk]');
-    return [...phrases].slice(0, 100);
-  }
 
+      const canonical = canonicalSpeech(originalName);
+      phrases.add(canonical);
+      
+      // Variante separando la palabra a la mitad (ej. Restrepo -> res trepo)
+      if (words.length === 1 && canonical.length > 5) {
+        const mid = Math.floor(canonical.length / 2);
+        phrases.add(canonical.slice(0, mid) + ' ' + canonical.slice(mid));
+      }
+
+      // Variantes por confusiones fonéticas (S por Z, B por V, etc.)
+      let variant = canonical.replace(/z/g, 's').replace(/s/g, 'z').replace(/v/g, 'b').replace(/ll/g, 'y').replace(/j/g, 'h');
+      phrases.add(variant);
+
+      // Variante si el micrófono se "come" la última letra
+      if (canonical.length > 4) phrases.add(canonical.slice(0, -1));
+    }
+    
+    phrases.add('[unk]');
+    
+    // Subimos el límite a 2000 para que quepan TODOS los trabajadores e insumos del Excel
+    return [...phrases].slice(0, 2000); 
+  }
+    
   function matchCaballon(code) {
     const c = normalize(code).replace(/\s+/g,'');
     return catalog.caballones.find(x => normalize(x.codigoQR).replace(/\s+/g,'') === c) || null;
