@@ -300,14 +300,13 @@
             const text = String(message && message.result && message.result.text || '').trim();
             if (!text || text.includes('[unk]') || text.length < 2) return;
             
-            latestFinal = text;
-            if (partialTimer) clearTimeout(partialTimer);
-            latestPartial = '';
-            
             if (typeof acceptCandidate === 'function' && !candidateIsValid(text)) {
                status('No coincide con la lista. Escuchando de nuevo…');
                return; 
             }
+            latestFinal = text; 
+            if (partialTimer) clearTimeout(partialTimer);
+            latestPartial = '';
             
             if (options.kind === 'catalog' && tokenCount(text) < 2) {
               if (oneWordTimer) clearTimeout(oneWordTimer);
@@ -321,14 +320,13 @@
             if (settled) return;
             const partial = String(message && message.result && message.result.partial || '').trim();
             if (!partial || partial.includes('[unk]')) return;
-            latestPartial = partial;
-            if (oneWordTimer) { clearTimeout(oneWordTimer); oneWordTimer = null; }
             
-            // NUEVO ARREGLO: Validar el parcial ANTES de mostrarlo o usarlo
             if (typeof acceptCandidate === 'function' && !candidateIsValid(partial)) {
                status('Escuchando sin internet… (procesando)');
                return; 
             }
+            latestPartial = partial; 
+            if (oneWordTimer) { clearTimeout(oneWordTimer); oneWordTimer = null; }
 
             status('Escuchando sin internet… Se reconoce: ' + partial);
             if (partialTimer) clearTimeout(partialTimer);
