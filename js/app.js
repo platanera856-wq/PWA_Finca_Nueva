@@ -11,16 +11,15 @@
   let qrAlreadyLaunched = '';
   let cameraRestartPending = false;
   let voiceProgress = { insumosDone: false, observationsDone: false };
-  // Mantener la pantalla encendida durante toda la entrevista, para que Android
-  // no suspenda el micrófono ni salte a la siguiente pregunta.
   let screenWakeLock = null;
   let wakeLockRequestPending = false;
   let wakeLockFallbackNotified = false;
+
   async function holdScreenAwake() {
     if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
       if (interviewRunning && !wakeLockFallbackNotified) {
         wakeLockFallbackNotified = true;
-        showNotice('Este navegador no permite mantener la pantalla encendida. Para evitar que se interrumpa la voz, mantenga la PWA en primer plano y aumente temporalmente el tiempo de bloqueo de pantalla del teléfono.', 'info');
+        showNotice('Este navegador no permite mantener la pantalla encendida. Mantenga la PWA en primer plano y aumente el tiempo de bloqueo de pantalla.', 'info');
       }
       return false;
     }
@@ -32,24 +31,22 @@
       screenWakeLock = await navigator.wakeLock.request('screen');
       screenWakeLock.addEventListener('release', () => {
         screenWakeLock = null;
-        // Android puede liberar el bloqueo al cambiar de aplicación o apagar
-        // la pantalla; volver a pedirlo cuando la PWA esté visible.
         if (interviewRunning && document.visibilityState === 'visible') {
           window.setTimeout(() => { void holdScreenAwake(); }, 300);
         }
       }, { once: true });
       return true;
     } catch (error) {
-      console.warn('No se pudo mantener activa la pantalla durante la entrevista:', error);
       if (interviewRunning && !wakeLockFallbackNotified) {
         wakeLockFallbackNotified = true;
-        showNotice('Android no permitió mantener la pantalla activa. Mantenga la PWA en primer plano y aumente temporalmente el tiempo de bloqueo de pantalla del teléfono.', 'info');
+        showNotice('Android no permitió mantener la pantalla activa. Mantenga la PWA en primer plano y aumente el tiempo de bloqueo.', 'info');
       }
       return false;
     } finally {
       wakeLockRequestPending = false;
     }
   }
+
   async function releaseScreenAwake() {
     const lock = screenWakeLock;
     screenWakeLock = null;
@@ -68,7 +65,6 @@
     el.className = 'notice ' + kind;
     el.hidden = !text;
   }
-  function setCatalogStatus(_) { /* Los catálogos se cargan en silencio; solo se muestran errores. */ }
   function normalize(text) { return FincaVoice.normalize(text); }
   function todayLocal() {
     const d = new Date(); const p = n => String(n).padStart(2, '0');
@@ -139,31 +135,31 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
-  // La pronunciación puede variar, pero solo se acepta una opción real y no ambigua del catálogo.
+  // Reglas fonéticas generales y dinámicas (funciona para cualquier nombre del Excel)
   function canonicalSpeech(text) {
     let s = normalize(text);
-    // Retirar frases habituales que pueden quedar pegadas a la respuesta reconocida.
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
     s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    // Variantes fonéticas frecuentes de reconocimiento de insumos.
-    s = s.replace(/\b(insec)\s+(ticida)\b/g, 'insecticida');
-    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas|insetisida)\b/g, 'insecticida');
-    // Variantes comunes por errores y separación silábica del reconocedor local.
+    
+    // Normalizar sonidos de Vosk
+    s = s.replace(/z/g, 's');
+    s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
+    
+    // Limpiar la H inicial (Vosk suele ignorar la H)
+    s = s.replace(/\b(h)([aeiou])/g, '$2'); 
+    
+    // Errores comunes en nombres
+    s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
+    s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
     s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
-    s = s.replace(/\b(elquin|elkyn|elkinh|elkim|elquin)\b/g, 'elkin');
     s = s.replace(/\b(san)\s+(dra)\b/g, 'sandra');
     s = s.replace(/\b(res)\s+(trepo|trebo)\b/g, 'restrepo');
-    s = s.replace(/\b(rest)\s+(repo|rebo)\b/g, 'restrepo');
-    s = s.replace(/\b(restrebo|restrevo|restrepoo|restrepo)\b/g, 'restrepo');
-    // Variantes frecuentes de Codornaza y Gallinaza; no se altera el nombre real del catálogo.
-    s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
-    s = s.replace(/\b(codornasa|codornassa|codorna za|codornacia|codornaza)\b/g, 'codornaza');
-    s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
-    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina za|gayinaza|gallinacia)\b/g, 'gallinaza');
+
     return s.replace(/\s+/g,' ').trim();
   }
+
   const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor','mi','me','yo','soy','nombre','llamo','es','diga','dijo','corresponde']);
   function meaningfulTokens(text) { return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t)); }
   function editDistance(a, b) {
@@ -183,15 +179,12 @@
     if (queryToken === itemToken) return true;
     const shortest = Math.min(queryToken.length, itemToken.length);
     const distance = editDistance(queryToken, itemToken);
-    // Nombres: admite una diferencia para nombres medianos y hasta dos en apellidos largos.
-    // Insumos: admite una diferencia fonética en palabras largas, sin confundir categorías distintas.
     if (type === 'trabajador') {
       if (shortest >= 5 && distance <= 1) return true;
       if (shortest >= 8 && distance <= 2 && queryToken.slice(0,3) === itemToken.slice(0,3)) return true;
     }
     if (type === 'insumo') {
       if (shortest >= 7 && distance <= 1) return true;
-      // Dos diferencias solo si el comienzo fonético coincide; evita saltar a otro insumo.
       if (shortest >= 8 && distance <= 2 && queryToken.slice(0,4) === itemToken.slice(0,4)) return true;
     }
     if (type === 'labor') {
@@ -206,7 +199,6 @@
     const exact = items.filter(item => canonicalSpeech(item.nombre) === query || canonicalSpeech(item.id) === query);
     if (exact.length === 1) return exact[0];
     const queryTokens = new Set(meaningfulTokens(query));
-    // Primer nombre, como en la interfaz original; si hay homónimos, exige otra palabra.
     if (type === 'trabajador') {
       const firstNameMatches = items.filter(item => {
         const words = canonicalSpeech(item.nombre).split(/\s+/).filter(Boolean);
@@ -218,7 +210,6 @@
         if (ranked.length && ranked[0].score > ranked[1].score) return ranked[0].item;
       }
     }
-    // Tokens exclusivos pesan más que palabras repetidas como «control», «cuido» o «alim».
     const termFrequency = {};
     for (const item of items) for (const term of new Set(meaningfulTokens(item.nombre))) termFrequency[term]=(termFrequency[term]||0)+1;
     const ranked = [];
@@ -231,7 +222,6 @@
       let score = 0;
       for (const term of new Set(hit)) score += (termFrequency[term] || 0) === 1 ? 10 : 1;
       if (itemTokens.length > 0 && itemTokens.every(t => queryList.some(q => tokenMatches(q, t, type)))) score += 20;
-      // La coincidencia fonética aproximada tiene menos peso que la exacta.
       const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
       score += exactHitCount * 3;
       ranked.push({item,score});
@@ -241,45 +231,36 @@
     if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
     return ranked[0].item;
   }
-  // El reconocedor local puede recibir una lista de frases esperadas para darles
-  // prioridad. Siempre se incluye [unk] como salida alternativa y solo se incluyen
-  // nombres reales del catálogo más variantes de pronunciación conocidas.
-    function buildVoiceGrammar(items, type) {
+
+  // Diccionario Dinámico (lee el Excel y crea variantes)
+  function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
       const originalName = String(item && item.nombre || '').trim();
       if (!originalName) continue;
       
       phrases.add(originalName);
+      const canonical = canonicalSpeech(originalName);
+      phrases.add(canonical);
       
-      const words = originalName.split(/\s+/);
+      const words = canonical.split(/\s+/);
       for (const word of words) {
         if (word.length > 2) phrases.add(word); 
       }
 
-      const canonical = canonicalSpeech(originalName);
-      phrases.add(canonical);
-      
-      // Variante separando la palabra a la mitad (ej. Restrepo -> res trepo)
       if (words.length === 1 && canonical.length > 5) {
         const mid = Math.floor(canonical.length / 2);
         phrases.add(canonical.slice(0, mid) + ' ' + canonical.slice(mid));
       }
-
-      // Variantes por confusiones fonéticas (S por Z, B por V, etc.)
-      let variant = canonical.replace(/z/g, 's').replace(/s/g, 'z').replace(/v/g, 'b').replace(/ll/g, 'y').replace(/j/g, 'h');
-      phrases.add(variant);
-
-      // Variante si el micrófono se "come" la última letra
-      if (canonical.length > 4) phrases.add(canonical.slice(0, -1));
+      
+      if (canonical.includes('b')) phrases.add(canonical.replace(/b/g, 'v'));
+      if (canonical.includes('v')) phrases.add(canonical.replace(/v/g, 'b'));
     }
     
     phrases.add('[unk]');
-    
-    // Subimos el límite a 2000 para que quepan TODOS los trabajadores e insumos del Excel
-    return [...phrases].slice(0, 2000); 
+    return [...phrases].slice(0, 2000);
   }
-    
+
   function matchCaballon(code) {
     const c = normalize(code).replace(/\s+/g,'');
     return catalog.caballones.find(x => normalize(x.codigoQR).replace(/\s+/g,'') === c) || null;
@@ -320,7 +301,6 @@
     if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
     qrAlreadyLaunched = code;
     autoVoicePending = true;
-    // Deja terminar el callback del lector QR antes de solicitar el micrófono.
     window.setTimeout(() => { if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview(); }, 500);
   }
   function getSelectedName(id, list) { const item=list.find(x=>String(x.id)===String(id)); return item ? item.nombre : ''; }
@@ -435,6 +415,7 @@
 
   function findVoiceMatch(text, items, kind) { return matchCatalogVoice(text,items,kind); }
   function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono|modelo de voz|motor local|voz sin conexión|biblioteca local de voz|vosk/i.test((error && error.message)||''); }
+  
   async function askCatalogChoice(question, items, select, kind) {
     if (!items.length) throw new Error('La lista de '+kind+' está vacía.');
     const shortPrompt = kind==='trabajador' ? 'No está en la lista. ¿Trabajador?' : kind==='labor' ? 'No la encontré. ¿Qué labor?' : 'No lo encontré. ¿Qué insumo?';
@@ -460,6 +441,7 @@
       }
     }
   }
+  
   async function askNumber(question, field, validator, invalidPrompt, kind='number') {
     let attempts=0;
     while (true) {
@@ -529,16 +511,13 @@
       showNotice(message,'error'); FincaVoice.status(message); return;
     }
     interviewRunning=true; autoVoicePending=false; updateSaveButton();
-    // Pedir el bloqueo antes de preparar el modelo y empezar la entrevista.
     void holdScreenAwake();
+    let interviewError = null;
     try {
-      // No comenzar a preguntar hasta preparar el reconocimiento local. En la primera
-      // apertura conectada esto descarga y guarda el modelo español; después sirve sin internet.
       try {
         await FincaVoice.prepareOffline();
       } catch (modelError) {
         if (!navigator.onLine) throw modelError;
-        // Respaldo temporal conectado: permite seguir probando si Vosk no carga.
         FincaVoice.status('El reconocimiento local no se pudo preparar; esta sesión intentará usar el navegador conectado.');
       }
       const voiceGreetingOk = await FincaVoice.welcome();
@@ -574,6 +553,7 @@
         await FincaVoice.say('Datos en pantalla.');
       }
     } catch (error) {
+      interviewError = error;
       showNotice(error.message || 'Se interrumpió la entrevista.', 'error');
       const spokenFailure = /modelo de voz|motor local|biblioteca local|voz sin conexión|vosk/i.test(error.message || '')
         ? 'La voz sin conexión no está lista. Revise el aviso en pantalla.'
@@ -589,6 +569,10 @@
       updateSaveButton();
       if (cameraRestartPending && window.FincaCamera) {
         cameraRestartPending=false; window.setTimeout(()=>void window.FincaCamera.start(),500);
+      }
+      // NUEVO: Desbloquear el QR si hubo un error fatal para permitir reintentos
+      if (interviewError && isFatalVoiceError(interviewError)) {
+        qrAlreadyLaunched = '';
       }
     }
   }
@@ -608,16 +592,11 @@
   });
   window.addEventListener('online',()=>{networkStatus();void syncAndRender();void loadCatalogs();});
   window.addEventListener('offline',networkStatus); networkStatus();
-  // Si el reconocimiento automático es bloqueado por el navegador, cualquier toque de pantalla
-  // posterior sirve de gesto de autorización; no se muestra un botón adicional.
   document.addEventListener('pointerdown',()=>{
-    // Desbloquear la síntesis de voz dentro del gesto real del usuario; no añade botones.
     if (window.FincaVoice && typeof FincaVoice.unlockAudio === 'function') FincaVoice.unlockAudio();
     if (autoVoicePending && !interviewRunning && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
   },true);
   void locate();
-  // Preparar el modelo local en segundo plano desde la primera apertura conectada.
-  // La persona debe esperar a que el estado indique «Voz sin conexión lista» antes de apagar internet.
   void FincaVoice.prepareOffline().catch(error => {
     console.warn('No se pudo preparar la voz sin conexión:', error);
     FincaVoice.status(error && error.message ? error.message : 'No se pudo preparar el reconocimiento sin conexión.');
