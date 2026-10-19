@@ -341,9 +341,10 @@
           // argumento, volver automáticamente al reconocedor abierto de la 0.5.9.
           if (Array.isArray(options.grammarPhrases) && options.grammarPhrases.length) {
             try {
-              recognizer = new offlineModel.KaldiRecognizer(16000, JSON.stringify(options.grammarPhrases));
+              const grammar = options.grammarPhrases.map(p => p.toLowerCase());
+              recognizer = new offlineModel.KaldiRecognizer(16000, JSON.stringify(grammar));
             } catch (grammarError) {
-              console.warn('Esta biblioteca Vosk no admite gramática contextual; se usará el reconocedor normal.', grammarError);
+              console.warn('Fallo al aplicar gramática, usando reconocimiento abierto:', grammarError);
             }
           }
           if (!recognizer) recognizer = new offlineModel.KaldiRecognizer(16000);
