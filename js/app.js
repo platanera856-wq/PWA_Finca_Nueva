@@ -15,7 +15,6 @@
   let wakeLockRequestPending = false;
   let wakeLockFallbackNotified = false;
 
-  // 1. Gramática estricta para los números (evita que Vosk invente)
   const NUMBER_GRAMMAR = [
     'cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez',
     'once','doce','trece','catorce','quince','dieciseis','diecisiete','dieciocho','diecinueve','veinte',
@@ -29,7 +28,7 @@
     if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
       if (interviewRunning && !wakeLockFallbackNotified) {
         wakeLockFallbackNotified = true;
-        showNotice('Este navegador no permite mantener la pantalla encendida. Mantenga la PWA en primer plano y aumente el tiempo de bloqueo de pantalla.', 'info');
+        showNotice('Mantenga la PWA en primer plano durante la entrevista.', 'info');
       }
       return false;
     }
@@ -49,7 +48,7 @@
     } catch (error) {
       if (interviewRunning && !wakeLockFallbackNotified) {
         wakeLockFallbackNotified = true;
-        showNotice('Android no permitió mantener la pantalla activa. Mantenga la PWA en primer plano y aumente el tiempo de bloqueo.', 'info');
+        showNotice('Android no permitió mantener la pantalla activa.', 'info');
       }
       return false;
     } finally {
@@ -93,7 +92,7 @@
     if (!data || data.exito !== true) throw new Error((data && data.mensaje) || 'Apps Script no devolvió los catálogos.');
     for (const key of ['empleados','labores','insumos','caballones']) if (!Array.isArray(data[key])) data[key] = [];
     if (!data.empleados.length || !data.labores.length || !data.insumos.length || !data.caballones.length) {
-      throw new Error('Apps Script devolvió un catálogo vacío. Compruebe las hojas de la finca.');
+      throw new Error('Apps Script devolvió un catálogo vacío.');
     }
     return { empleados:data.empleados, labores:data.labores, insumos:data.insumos, caballones:data.caballones, cachedAt:new Date().toISOString() };
   }
@@ -154,27 +153,21 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
-  // 2. Normalización bidireccional (Traduce la fonética de vuelta al Excel)
   function canonicalSpeech(text) {
     let s = normalize(text);
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
-    
-    // Correcciones específicas
+    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
     s = s.replace(/\b(ka|ca)\s+(ce|se|ze)\s+(ele|le|cle)\b/g, 'kcl');
     s = s.replace(/\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    
-    s = s.replace(/\b(kodornasa|co dor na sa|codor nasa|codor naza)\b/g, 'codornaza');
-    s = s.replace(/\b(gayinasa|galli nasa|galli naza|ga yi na sa)\b/g, 'gallinaza');
-    s = s.replace(/\b(embolsar rasimo|embol sar|embol sar racimo)\b/g, 'embolsar racimo');
-    s = s.replace(/\b(yenar bolsa|yenar bosa|yenar bolza)\b/g, 'llenar bolsa');
-    
-    s = s.replace(/\b(desoje|de soje|deshoj)\b/g, 'deshoje');
+    s = s.replace(/z/g, 's');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
+    s = s.replace(/\b(h)([aeiou])/g, '$2'); 
+    s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
+    s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
     s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
     s = s.replace(/\b(san)\s+(dra)\b/g, 'sandra');
     s = s.replace(/\b(res)\s+(trepo|trebo)\b/g, 'restrepo');
-
     return s.replace(/\s+/g,' ').trim();
   }
 
@@ -257,61 +250,17 @@
     return ranked[0].item;
   }
 
-  // 3. Generador Fonético para Vosk (Lee el Excel y lo traduce a sonidos)
   function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
       const originalName = String(item && item.nombre || '').trim();
-      if (!originalName) continue;
-      
-      const base = originalName.toLowerCase();
-      phrases.add(base);
-
-      // Traducir a fonética para Vosk
-      const phonetic = base
-        .replace(/h/g, '')
-        .replace(/v/g, 'b')
-        .replace(/z/g, 's')
-        .replace(/ll/g, 'y')
-        .replace(/c(?=[ei])/g, 's')
-        .replace(/c(?=[aou])/g, 'k')
-        .replace(/q/g, 'k');
-
-      if (phonetic !== base) phrases.add(phonetic);
-
-      // Refuerzos manuales para casos exactos reportados
-      if (base.includes('codornaza')) {
-        phrases.add('codor nasa'); phrases.add('codor naza'); phrases.add('kodornasa'); phrases.add('co dor na sa');
-      }
-      if (base.includes('gallinaza')) {
-        phrases.add('galli nasa'); phrases.add('galli naza'); phrases.add('gayinasa'); phrases.add('ga yi na sa');
-      }
-      if (base.includes('embolsar')) {
-        phrases.add('embolsar rasimo'); phrases.add('embol sar'); phrases.add('embol sa');
-      }
-      if (base.includes('llenar bolsa')) {
-        phrases.add('yenar bolsa'); phrases.add('yenar bosa');
-      }
-      if (base === 'kcl') {
-        phrases.add('ka ce ele'); phrases.add('ka se le'); phrases.add('ca ce le');
-      }
-      if (base.includes('deshoj')) {
-        phrases.add('desoje'); phrases.add('de soje');
-      }
-      
-      // Separación de palabras compuestas y sílabas
-      const words = base.split(' ');
-      if (words.length > 1) {
-        phrases.add(words[0]);
-        phrases.add(words[1]);
-      }
-      if (base.length > 5 && base.indexOf(' ') === -1) {
-        const mid = Math.floor(base.length / 2);
-        phrases.add(base.slice(0, mid) + ' ' + base.slice(mid));
+      if (originalName) {
+        phrases.add(originalName);
+        phrases.add(originalName.toLowerCase());
       }
     }
     phrases.add('[unk]');
-    return [...phrases];
+    return [...phrases]; 
   }
 
   function matchCaballon(code) {
@@ -331,8 +280,9 @@
       else { catalogReady = false; showNotice('No se pudieron cargar las listas de la finca.', 'error'); }
     }
     renderSelects();
-    if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview();
+    if (autoVoicePending && navigator.onLine && matchCaballon($('caballon').value)) void startVoiceInterview();
   }
+  
   function onQrChange() {
     const code = $('caballon').value.trim();
     const info = $('caballon-detail');
@@ -346,16 +296,22 @@
       scheduleAutomaticInterview(code);
     } else {
       if (info) info.textContent = 'El QR no corresponde a un caballón del catálogo.';
-      showNotice('El QR no está registrado en la finca. No se permitirá guardar este registro.', 'error');
+      showNotice('El QR no está registrado en la finca.', 'error');
       updateSaveButton();
     }
   }
+  
   function scheduleAutomaticInterview(code) {
+    if (!navigator.onLine) {
+      showNotice('Sin internet: por favor, complete los datos manualmente.', 'info');
+      return;
+    }
     if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
     qrAlreadyLaunched = code;
     autoVoicePending = true;
     window.setTimeout(() => { if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview(); }, 500);
   }
+  
   function getSelectedName(id, list) { const item=list.find(x=>String(x.id)===String(id)); return item ? item.nombre : ''; }
   function validEmployee() { return catalog.empleados.some(x=>String(x.id)===String($('empleado').value)); }
   function validLabor() { return catalog.labores.some(x=>String(x.id)===String($('labor').value)); }
@@ -448,6 +404,7 @@
       return false;
     } finally { updateSaveButton(); }
   }
+  
   function resetAfterSave(fromVoice = false) {
     $('empleado').value=''; $('labor').value=''; $('horas').value=''; $('matas').value=''; $('observaciones').value='';
     $('insumos-container').replaceChildren(); $('fecha').value=todayLocal(); $('caballon').value='';
@@ -457,6 +414,7 @@
     else if (window.FincaCamera) window.setTimeout(()=>void window.FincaCamera.start(),500);
     updateSaveButton();
   }
+  
   async function renderRecords() {
     try {
       const records=await FincaDB.all(); const pending=records.filter(r=>r.syncStatus!=='synced');
@@ -475,7 +433,7 @@
   }
 
   function findVoiceMatch(text, items, kind) { return matchCatalogVoice(text,items,kind); }
-  function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono|modelo de voz|motor local|voz sin conexión|biblioteca local de voz|vosk/i.test((error && error.message)||''); }
+  function isFatalVoiceError(error) { return /micrófono está bloqueado|no se encontró un micrófono|no ofrece reconocimiento|necesita internet|no se pudo iniciar el micrófono/i.test((error && error.message)||''); }
   
   async function askCatalogChoice(question, items, select, kind) {
     if (!items.length) throw new Error('La lista de '+kind+' está vacía.');
@@ -518,6 +476,7 @@
       await FincaVoice.say(attempts%3===0 ? invalidPrompt : 'No entendí el número. Otra vez.', {silentError:true});
     }
   }
+  
   async function askText(question) {
     let attempts=0;
     while (true) {
@@ -530,6 +489,7 @@
       await FincaVoice.say(attempts%3===0?'¿Observaciones? Diga ninguna si no hay.':'No escuché. Repita la observación.',{silentError:true});
     }
   }
+  
   async function askYesNo(question) {
     let attempts=0;
     while (true) {
@@ -542,6 +502,7 @@
       await FincaVoice.say(attempts%3===0?'Responda sí o no.':'No entendí. Sí o no.',{silentError:true});
     }
   }
+  
   async function askInsumos() {
     const use=await askYesNo('¿Usó insumos? Sí o no.');
     if (!use) return;
@@ -560,26 +521,25 @@
       const more=await askYesNo('¿Otro insumo? Sí o no.'); if (!more) break;
     }
   }
+  
   async function startVoiceInterview() {
+    if (!navigator.onLine) {
+       showNotice('Sin internet: complete el formulario manualmente.', 'info');
+       return;
+    }
     if (interviewRunning) return;
     if (!catalogReady || !matchCaballon($('caballon').value.trim())) { autoVoicePending=true; return; }
     if (!FincaVoice.supportsRecognition()) {
       autoVoicePending=true;
-      const message='Este navegador no permite reconocimiento de voz. Abra la PWA en Chrome actualizado del teléfono.';
+      const message='Este navegador no permite reconocimiento de voz.';
       showNotice(message,'error'); FincaVoice.status(message); return;
     }
     interviewRunning=true; autoVoicePending=false; updateSaveButton();
     void holdScreenAwake();
     let interviewError = null;
     try {
-      try {
-        await FincaVoice.prepareOffline();
-      } catch (modelError) {
-        if (!navigator.onLine) throw modelError;
-        FincaVoice.status('El reconocimiento local no se pudo preparar; esta sesión intentará usar el navegador conectado.');
-      }
       const voiceGreetingOk = await FincaVoice.welcome();
-      if (!voiceGreetingOk) { autoVoicePending=true; throw new Error('El navegador bloqueó el audio. Toque la pantalla una vez para activar la voz.'); }
+      if (!voiceGreetingOk) { autoVoicePending=true; throw new Error('Toque la pantalla una vez para activar la voz.'); }
       if (!validEmployee()) await askCatalogChoice('¿Trabajador?',catalog.empleados,$('empleado'),'trabajador');
       if (!validLabor()) await askCatalogChoice('¿Labor?',catalog.labores,$('labor'),'labor');
       
@@ -630,9 +590,7 @@
     } catch (error) {
       interviewError = error;
       showNotice(error.message || 'Se interrumpió la entrevista.', 'error');
-      const spokenFailure = /modelo de voz|motor local|biblioteca local|voz sin conexión|vosk/i.test(error.message || '')
-        ? 'La voz sin conexión no está lista. Revise el aviso en pantalla.'
-        : /micrófono/i.test(error.message || '') ? 'Revise el permiso del micrófono.' : 'No pude continuar. Repitamos la pregunta.';
+      const spokenFailure = /micrófono/i.test(error.message || '') ? 'Revise el permiso del micrófono.' : 'No pude continuar. Repitamos la pregunta.';
       await FincaVoice.say(spokenFailure, {silentError:true});
       if (isFatalVoiceError(error)) {
         autoVoicePending=true;
@@ -668,13 +626,9 @@
   window.addEventListener('offline',networkStatus); networkStatus();
   document.addEventListener('pointerdown',()=>{
     if (window.FincaVoice && typeof FincaVoice.unlockAudio === 'function') FincaVoice.unlockAudio();
-    if (autoVoicePending && !interviewRunning && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
+    if (autoVoicePending && !interviewRunning && navigator.onLine && catalogReady && matchCaballon($('caballon').value.trim())) void startVoiceInterview();
   },true);
   void locate();
-  void FincaVoice.prepareOffline().catch(error => {
-    console.warn('No se pudo preparar la voz sin conexión:', error);
-    FincaVoice.status(error && error.message ? error.message : 'No se pudo preparar el reconocimiento sin conexión.');
-  });
   void loadCatalogs();
   void renderRecords();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
