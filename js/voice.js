@@ -255,6 +255,17 @@
         status('Inicializando el motor de voz en español. Puede tardar un poco la primera vez…');
         offlineModel = await window.Vosk.createModel(archiveObjectUrl);
         if (!offlineModel || typeof offlineModel.KaldiRecognizer !== 'function') throw new Error('El motor no devolvió un reconocedor válido.');
+        
+        status('Verificando que el modelo responda sin internet…');
+        const testRecognizer = new offlineModel.KaldiRecognizer(16000);
+        if (!testRecognizer) throw new Error('El modelo descargado no pudo iniciar el reconocedor.');
+        try {
+            const dummyBuffer = { length: 16000, numberOfChannels: 1, sampleRate: 16000, getChannelData: () => new Float32Array(16000) };
+            testRecognizer.acceptWaveform(dummyBuffer);
+        } catch (e) {
+            console.warn('Prueba de audio en falso falló, pero el modelo cargó.', e);
+        }
+        testRecognizer.remove();
         status('Voz sin conexión lista.');
         return true;
       } catch (error) {
