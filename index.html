@@ -11,7 +11,10 @@
 </head>
 <body>
 <header class="top">
-  <div><p class="eyebrow">FINCA · REGISTROS</p><h1>Registro de labores</h1></div>
+  <div>
+    <h1 style="margin: 0 0 5px 0; font-size: 1.6rem; line-height: 1.1;">FINCA LA ESPERANZA</h1>
+    <p class="eyebrow" style="margin: 0; font-size: 0.9rem;">REGISTRO DE LABORES</p>
+  </div>
   <span id="network" class="status">Comprobando conexión…</span>
 </header>
 <main>
@@ -24,7 +27,6 @@
         <h3>Escanear QR del caballón</h3>
         <div id="qr-reader" aria-label="Visor para escanear el código QR"></div>
         <p id="qr-status" class="note" aria-live="polite">Preparando cámara y lector QR…</p>
-        <p id="voice-status" class="note voice-status" role="status" aria-live="polite">Preparando el reconocimiento de voz en español… Mantenga internet activo hasta que indique que la voz sin conexión está lista.</p>
       </div>
       <h3>Datos de la labor</h3>
       <label>Fecha de la labor (se completa automáticamente)
@@ -55,19 +57,21 @@
     </form>
   </section>
 
+  <!-- Panel de registros oculto para el trabajador -->
   <section class="panel">
-    <div class="list-head"><h2>Registros de este teléfono</h2><span id="pending-count" class="count">0</span></div>
-    <p class="note">Los registros se guardan primero en el teléfono. Al recuperar internet se intentará enviarlos a Google Sheets.</p>
-    <div id="records" class="records"><p class="note">Cargando registros locales…</p></div>
-    <div class="actions"><button id="sync-btn" type="button" class="secondary">Sincronizar pendientes</button><button id="export-btn" type="button" class="secondary">Exportar copia JSON</button></div>
-    <p id="sync-status" class="note" aria-live="polite">Preparando sincronización…</p>
+    <div style="display: none;">
+      <div class="list-head"><h2>Registros de este teléfono</h2><span id="pending-count" class="count">0</span></div>
+      <p class="note">Los registros se guardan primero en el teléfono. Al recuperar internet se intentará enviarlos a Google Sheets.</p>
+      <div id="records" class="records"><p class="note">Cargando registros locales…</p></div>
+      <div class="actions"><button id="sync-btn" type="button" class="secondary">Sincronizar pendientes</button><button id="export-btn" type="button" class="secondary">Exportar copia JSON</button></div>
+    </div>
+    <p id="sync-status" class="note" aria-live="polite" style="text-align: center; margin-top: 10px; font-weight: bold; color: #245b35;">No hay registros pendientes. Todo está sincronizado.</p>
   </section>
 </main>
-<footer>Versión conectada de prueba. No use en producción sin verificar registros en Google Sheets.</footer>
+<footer>Versión conectada. No use en producción sin verificar registros en Google Sheets.</footer>
 <script src="./js/config.js"></script>
 <script src="./js/api.js"></script>
 <script src="./js/db.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js?v=051" crossorigin="anonymous"></script>
 <script src="./js/voice.js"></script>
 <script src="./js/html5-qrcode.min.js"></script>
 <script src="./js/camera.js"></script>
