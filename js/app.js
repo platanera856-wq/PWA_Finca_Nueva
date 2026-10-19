@@ -15,7 +15,7 @@
   let wakeLockRequestPending = false;
   let wakeLockFallbackNotified = false;
 
-  // Gramática estricta y fonética para números
+  // 1. Gramática estricta para los números (evita que Vosk invente)
   const NUMBER_GRAMMAR = [
     'cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez',
     'once','doce','trece','catorce','quince','dieciseis','diecisiete','dieciocho','diecinueve','veinte',
@@ -154,25 +154,27 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
-  // MEJORA: Normalizar "ka ce ele" a "kcl" y limpiar fonética
+  // 2. Normalización bidireccional (Traduce la fonética de vuelta al Excel)
   function canonicalSpeech(text) {
     let s = normalize(text);
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
-    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
     
-    // Convertir "ka ce ele", "ka se le", "ca ce le" a KCl
+    // Correcciones específicas
     s = s.replace(/\b(ka|ca)\s+(ce|se|ze)\s+(ele|le|cle)\b/g, 'kcl');
     s = s.replace(/\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
     
-    s = s.replace(/z/g, 's');
+    s = s.replace(/\b(kodornasa|co dor na sa|codor nasa|codor naza)\b/g, 'codornaza');
+    s = s.replace(/\b(gayinasa|galli nasa|galli naza|ga yi na sa)\b/g, 'gallinaza');
+    s = s.replace(/\b(embolsar rasimo|embol sar|embol sar racimo)\b/g, 'embolsar racimo');
+    s = s.replace(/\b(yenar bolsa|yenar bosa|yenar bolza)\b/g, 'llenar bolsa');
+    
+    s = s.replace(/\b(desoje|de soje|deshoj)\b/g, 'deshoje');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
-    s = s.replace(/\b(h)([aeiou])/g, '$2'); 
-    s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
-    s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
     s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
     s = s.replace(/\b(san)\s+(dra)\b/g, 'sandra');
     s = s.replace(/\b(res)\s+(trepo|trebo)\b/g, 'restrepo');
+
     return s.replace(/\s+/g,' ').trim();
   }
 
@@ -255,7 +257,7 @@
     return ranked[0].item;
   }
 
-  // MEJORA: Gramática fonética inteligente
+  // 3. Generador Fonético para Vosk (Lee el Excel y lo traduce a sonidos)
   function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
@@ -265,38 +267,51 @@
       const base = originalName.toLowerCase();
       phrases.add(base);
 
-      // 1. Quitar la 'h' muda (herbicida -> erbicida)
-      let sinH = base.replace(/^h/, '').replace(/\sh/g, ' ');
-      if (sinH !== base) phrases.add(sinH);
+      // Traducir a fonética para Vosk
+      const phonetic = base
+        .replace(/h/g, '')
+        .replace(/v/g, 'b')
+        .replace(/z/g, 's')
+        .replace(/ll/g, 'y')
+        .replace(/c(?=[ei])/g, 's')
+        .replace(/c(?=[aou])/g, 'k')
+        .replace(/q/g, 'k');
 
-      // 2. Cambiar 'c' por 's' (insecticida -> insestisida)
-      let conS = base.replace(/c/g, 's').replace(/z/g, 's');
-      if (conS !== base) phrases.add(conS);
+      if (phonetic !== base) phrases.add(phonetic);
 
-      // 3. Cambiar 'v' por 'b' (uva -> uba)
-      let conB = base.replace(/v/g, 'b');
-      if (conB !== base) phrases.add(conB);
-
-      // 4. Separar palabras que terminan en "icida" o "ida" para forzar la primera sílaba
-      if (base.endsWith('icida')) {
-        const root = base.slice(0, -5);
-        phrases.add(root + ' icida');
-        phrases.add(root + ' isida');
-        phrases.add(root + 'i cida');
+      // Refuerzos manuales para casos exactos reportados
+      if (base.includes('codornaza')) {
+        phrases.add('codor nasa'); phrases.add('codor naza'); phrases.add('kodornasa'); phrases.add('co dor na sa');
       }
-
-      // 5. Acrónimo KCl (deletreado)
+      if (base.includes('gallinaza')) {
+        phrases.add('galli nasa'); phrases.add('galli naza'); phrases.add('gayinasa'); phrases.add('ga yi na sa');
+      }
+      if (base.includes('embolsar')) {
+        phrases.add('embolsar rasimo'); phrases.add('embol sar'); phrases.add('embol sa');
+      }
+      if (base.includes('llenar bolsa')) {
+        phrases.add('yenar bolsa'); phrases.add('yenar bosa');
+      }
       if (base === 'kcl') {
-        phrases.add('ka ce ele'); phrases.add('ka se le'); phrases.add('ca ce le'); phrases.add('ka cl');
+        phrases.add('ka ce ele'); phrases.add('ka se le'); phrases.add('ca ce le');
       }
-
-      // 6. Labor Deshoje
-      if (type === 'labor' && /deshoj|desoj/.test(base)) {
-        phrases.add('de soje'); phrases.add('desoje');
+      if (base.includes('deshoj')) {
+        phrases.add('desoje'); phrases.add('de soje');
+      }
+      
+      // Separación de palabras compuestas y sílabas
+      const words = base.split(' ');
+      if (words.length > 1) {
+        phrases.add(words[0]);
+        phrases.add(words[1]);
+      }
+      if (base.length > 5 && base.indexOf(' ') === -1) {
+        const mid = Math.floor(base.length / 2);
+        phrases.add(base.slice(0, mid) + ' ' + base.slice(mid));
       }
     }
     phrases.add('[unk]');
-    return [...phrases]; 
+    return [...phrases];
   }
 
   function matchCaballon(code) {
@@ -344,7 +359,7 @@
   function getSelectedName(id, list) { const item=list.find(x=>String(x.id)===String(id)); return item ? item.nombre : ''; }
   function validEmployee() { return catalog.empleados.some(x=>String(x.id)===String($('empleado').value)); }
   function validLabor() { return catalog.labores.some(x=>String(x.id)===String($('labor').value)); }
-  function validHours() { const n=Number($('horas').value); return $('horas').value!=='' && Number.isFinite(n) && n>=0.5 && n<=8; }
+  function validHours() { const n=Number($('horas').value); return $('horas').value!=='' && Number.isFinite(n) && n>=0.5 && n<=8 && (n * 2) % 1 === 0; }
   function validPlants() { const n=Number($('matas').value); return $('matas').value!=='' && Number.isInteger(n) && n>0; }
   
   function getInsumosPayload() {
