@@ -465,7 +465,10 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
-        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {kind:'number'});
+        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {
+            kind:'number',
+            grammarPhrases: ['cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez','media','medio','coma','punto','[unk]']
+        });
         const value=FincaVoice.parseNumber(answer);
         if (value!==null && Number.isFinite(value) && validator(value)) {
           field.value=String(value); field.dispatchEvent(new Event('input',{bubbles:true})); field.dispatchEvent(new Event('change',{bubbles:true})); updateSaveButton(); return value;
