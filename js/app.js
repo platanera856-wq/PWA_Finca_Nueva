@@ -107,6 +107,13 @@
     if ($('caballon').value.trim()) onQrChange();
     updateSaveButton();
   }
+
+  // ARREGLO: Lee correctamente los decimales de Excel (convierte coma a punto)
+  function getDisponible(item) {
+    if (!item || item.disponible === undefined || item.disponible === null) return 0;
+    return parseFloat(String(item.disponible).replace(',', '.')) || 0;
+  }
+
   function renderInsumoStockText() {
     document.querySelectorAll('.insumo-row').forEach(row => {
       const select = row.querySelector('.insumo-select');
@@ -114,7 +121,7 @@
       const stockEl = row.querySelector('.insumo-stock');
       const item = catalog.insumos.find(x => String(x.id) === select.value);
       if (!item) { stockEl.textContent = 'Seleccione un insumo.'; stockEl.classList.remove('stock-error'); return; }
-      const available = Number(item.disponible) || 0;
+      const available = getDisponible(item);
       stockEl.textContent = `Disponible: ${available} ${item.unidad || ''}`.trim();
       const over = qty.value !== '' && Number(qty.value) > available;
       stockEl.classList.toggle('stock-error', over);
@@ -135,28 +142,20 @@
     row.append(labelSelect,labelQty,stock,remove); $('insumos-container').appendChild(row); renderInsumoStockText(); return row;
   }
 
-  // Reglas fonéticas generales y dinámicas (funciona para cualquier nombre del Excel)
   function canonicalSpeech(text) {
     let s = normalize(text);
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
     s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    
-    // Normalizar sonidos de Vosk
     s = s.replace(/z/g, 's');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
-    
-    // Limpiar la H inicial (Vosk suele ignorar la H)
     s = s.replace(/\b(h)([aeiou])/g, '$2'); 
-    
-    // Errores comunes en nombres
     s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
     s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
     s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
     s = s.replace(/\b(san)\s+(dra)\b/g, 'sandra');
     s = s.replace(/\b(res)\s+(trepo|trebo)\b/g, 'restrepo');
-
     return s.replace(/\s+/g,' ').trim();
   }
 
@@ -232,31 +231,25 @@
     return ranked[0].item;
   }
 
-  // Diccionario Dinámico (lee el Excel y crea variantes)
   function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
       const originalName = String(item && item.nombre || '').trim();
       if (!originalName) continue;
-      
       phrases.add(originalName);
       const canonical = canonicalSpeech(originalName);
       phrases.add(canonical);
-      
       const words = canonical.split(/\s+/);
       for (const word of words) {
         if (word.length > 2) phrases.add(word); 
       }
-
       if (words.length === 1 && canonical.length > 5) {
         const mid = Math.floor(canonical.length / 2);
         phrases.add(canonical.slice(0, mid) + ' ' + canonical.slice(mid));
       }
-      
       if (canonical.includes('b')) phrases.add(canonical.replace(/b/g, 'v'));
       if (canonical.includes('v')) phrases.add(canonical.replace(/v/g, 'b'));
     }
-    
     phrases.add('[unk]');
     return [...phrases].slice(0, 2000);
   }
@@ -317,8 +310,9 @@
       if (!raw || !Number.isFinite(Number(raw)) || Number(raw)<=0) throw new Error('Ingrese la cantidad del insumo.');
       const item=catalog.insumos.find(x=>String(x.id)===id);
       if (!item) throw new Error('El insumo no pertenece al catálogo.');
+      const available = getDisponible(item);
       totals[id]=(totals[id]||0)+Number(raw);
-      if (totals[id]>(Number(item.disponible)||0)) throw new Error(`Existencia insuficiente de ${item.nombre}. Solo hay ${Number(item.disponible)||0} ${item.unidad||''}.`);
+      if (totals[id]>available) throw new Error(`Existencia insuficiente de ${item.nombre}. Solo hay ${available} ${item.unidad||''}.`);
       items.push({idInsumo:id,cantidad:Number(raw)});
     }
     return items;
@@ -487,7 +481,7 @@
   async function askInsumos() {
     const use=await askYesNo('¿Usó insumos? Sí o no.');
     if (!use) return;
-    const availableItems=catalog.insumos.filter(item=>Number(item.disponible)>0);
+    const availableItems=catalog.insumos.filter(item=>getDisponible(item)>0);
     if (!availableItems.length) { await FincaVoice.say('No hay insumos disponibles.'); return; }
     let count=0;
     while (count<5) {
@@ -495,7 +489,7 @@
       const select=row.querySelector('.insumo-select');
       const qty=row.querySelector('.insumo-qty');
       const item=await askCatalogChoice('¿Qué insumo?',availableItems,select,'insumo');
-      const available=Number(item.disponible)||0;
+      const available=getDisponible(item);
       await askNumber(`¿Cantidad de ${item.nombre}? Disponible ${available} ${item.unidad||''}.`,qty,n=>n>0&&n<=available,`Solo hay ${available}. Diga una cantidad menor.`, 'cantidad');
       count++;
       if (count>=5) { await FincaVoice.say('Máximo cinco insumos.'); break; }
@@ -530,7 +524,7 @@
         const completeRow=[...document.querySelectorAll('.insumo-row')].some(row=>{
           const id=row.querySelector('.insumo-select').value, raw=row.querySelector('.insumo-qty').value;
           const item=catalog.insumos.find(x=>String(x.id)===String(id));
-          return !!item && raw!=='' && Number(raw)>0 && Number(raw)<=Number(item.disponible);
+          return !!item && raw!=='' && Number(raw)>0 && Number(raw)<=getDisponible(item);
         });
         if (!completeRow) await askInsumos();
         voiceProgress.insumosDone=true;
@@ -570,7 +564,6 @@
       if (cameraRestartPending && window.FincaCamera) {
         cameraRestartPending=false; window.setTimeout(()=>void window.FincaCamera.start(),500);
       }
-      // NUEVO: Desbloquear el QR si hubo un error fatal para permitir reintentos
       if (interviewError && isFatalVoiceError(interviewError)) {
         qrAlreadyLaunched = '';
       }
