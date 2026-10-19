@@ -15,6 +15,16 @@
   let wakeLockRequestPending = false;
   let wakeLockFallbackNotified = false;
 
+  // NUEVO: Gramática exacta y estricta para los números
+  const NUMBER_GRAMMAR = [
+    'cero','uno','dos','tres','cuatro','cinco','seis','siete','ocho','nueve','diez',
+    'once','doce','trece','catorce','quince','dieciseis','diecisiete','dieciocho','diecinueve','veinte',
+    'veintiuno','veintidos','veintitres','veinticuatro','veinticinco','veintiseis','veintisiete','veintiocho','veintinueve',
+    'treinta','cuarenta','cincuenta','sesenta','setenta','ochenta','noventa',
+    'cien','ciento','doscientos','trescientos','cuatrocientos','quinientos','seiscientos','setecientos','ochocientos','novecientos','mil',
+    'media','medio','coma','punto','[unk]'
+  ];
+
   async function holdScreenAwake() {
     if (!navigator.wakeLock || typeof navigator.wakeLock.request !== 'function') {
       if (interviewRunning && !wakeLockFallbackNotified) {
@@ -108,7 +118,6 @@
     updateSaveButton();
   }
 
-  // BLINDAJE: Lee la columna "CantidadDisponible" del Excel y maneja comas
   function getDisponible(item) {
     if (!item) return 0;
     const rawVal = item.CantidadDisponible !== undefined ? item.CantidadDisponible :
@@ -229,9 +238,8 @@
       const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
       score += exactHitCount * 3;
 
-      // Penalización por alucinaciones (Ej. "alim perro")
       const unmatchedQueryTokens = queryList.filter(q => !itemTokens.some(t => tokenMatches(q, t, type)));
-      score -= unmatchedQueryTokens.length * 25; 
+      score -= unmatchedQueryTokens.length * 30; 
 
       if (score < 10) continue;
       ranked.push({item,score});
@@ -242,27 +250,21 @@
     return ranked[0].item;
   }
 
+  // NUEVO: Gramática estricta que lee SOLO los nombres exactos del Excel
   function buildVoiceGrammar(items, type) {
     const phrases = new Set();
     for (const item of items || []) {
       const originalName = String(item && item.nombre || '').trim();
-      if (!originalName) continue;
-      phrases.add(originalName);
-      const canonical = canonicalSpeech(originalName);
-      phrases.add(canonical);
-      const words = canonical.split(/\s+/);
-      for (const word of words) {
-        if (word.length > 2) phrases.add(word); 
+      if (originalName) {
+        phrases.add(originalName);
+        phrases.add(originalName.toLowerCase());
       }
-      if (words.length === 1 && canonical.length > 5) {
-        const mid = Math.floor(canonical.length / 2);
-        phrases.add(canonical.slice(0, mid) + ' ' + canonical.slice(mid));
-      }
-      if (canonical.includes('b')) phrases.add(canonical.replace(/b/g, 'v'));
-      if (canonical.includes('v')) phrases.add(canonical.replace(/v/g, 'b'));
     }
+    if (type === 'insumo') phrases.add('herbicida');
+    if (type === 'labor') phrases.add('deshoje');
+    
     phrases.add('[unk]');
-    return [...phrases].slice(0, 2000);
+    return [...phrases]; 
   }
 
   function matchCaballon(code) {
@@ -279,7 +281,7 @@
     } catch (err) {
       const cache = safeParseCache();
       if (cache) { catalog = cache; catalogReady = true; }
-      else { catalogReady = false; showNotice('No se pudieron cargar las listas de la finca. Conéctese a internet y vuelva a abrir la aplicación.', 'error'); }
+      else { catalogReady = false; showNotice('No se pudieron cargar las listas de la finca.', 'error'); }
     }
     renderSelects();
     if (autoVoicePending && matchCaballon($('caballon').value)) void startVoiceInterview();
@@ -341,11 +343,11 @@
       if (!navigator.geolocation) { gps={latitud:null,longitud:null,ok:false}; $('sync-status').textContent='Este navegador no ofrece GPS.'; resolve(gps); return; }
       navigator.geolocation.getCurrentPosition(pos => {
         gps={latitud:pos.coords.latitude,longitud:pos.coords.longitude,ok:true};
-        $('sync-status').textContent=`GPS listo (precisión aproximada ${Math.round(pos.coords.accuracy)} m).`;
+        $('sync-status').textContent=`GPS listo.`;
         resolve(gps);
       }, err => {
         gps={latitud:null,longitud:null,ok:false};
-        $('sync-status').textContent=err.code===1?'Permita la ubicación para guardar el registro.':'No se pudo obtener GPS. Revise que la ubicación esté activada.';
+        $('sync-status').textContent='No se pudo obtener GPS.';
         resolve(gps);
       }, {enableHighAccuracy:true,timeout:20000,maximumAge:0});
     });
@@ -361,7 +363,6 @@
       if (!validHours()) throw new Error('Las horas deben ser entre 0,5 y 8, con pasos de media hora.');
       if (!validPlants()) throw new Error('Las plantas deben ser un número entero mayor que cero.');
       
-      // BLINDAJE: Validar contra PlantasPorCaballon exacto del Excel
       const maxPlantas = Number(cab.PlantasPorCaballon || cab.plantasPorCaballon || cab.plantas || cab.matas || 9999);
       if (Number($('matas').value) > maxPlantas) {
         throw new Error(`El caballón ${cab.nombre} solo tiene ${maxPlantas} plantas.`);
@@ -383,11 +384,11 @@
       await renderRecords();
       let finalMessage='Registro guardado en este teléfono.';
       if (navigator.onLine) {
-        try { await FincaSync.sendRecord(record); finalMessage='Registro guardado y confirmado por Apps Script.'; $('sync-status').textContent='Envío confirmado por Apps Script. Verifique la fila en Google Sheets.'; }
-        catch (sendError) { finalMessage='Registro guardado en este teléfono; pendiente de sincronización.'; $('sync-status').textContent='Pendiente de sincronización: '+sendError.message; }
+        try { await FincaSync.sendRecord(record); finalMessage='Registro guardado y confirmado por Apps Script.'; $('sync-status').textContent='Envío confirmado por Apps Script.'; }
+        catch (sendError) { finalMessage='Registro guardado; pendiente de sincronización.'; $('sync-status').textContent='Pendiente: '+sendError.message; }
       } else {
-        finalMessage='Registro guardado en este teléfono; se enviará cuando vuelva internet.';
-        $('sync-status').textContent='Sin internet: el registro sigue guardado localmente.';
+        finalMessage='Registro guardado; se enviará cuando vuelva internet.';
+        $('sync-status').textContent='Sin internet: guardado localmente.';
       }
       showNotice(finalMessage, 'success');
       await renderRecords();
@@ -460,10 +461,8 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
-        // BLINDAJE: Sin gramática restrictiva para permitir "ciento cincuenta" (150)
-        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {
-            kind:'number'
-        });
+        // Usar la gramática de números exacta
+        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {kind:'number', grammarPhrases: NUMBER_GRAMMAR});
         const value=FincaVoice.parseNumber(answer);
         if (value!==null && Number.isFinite(value) && validator(value)) {
           field.value=String(value); field.dispatchEvent(new Event('input',{bubbles:true})); field.dispatchEvent(new Event('change',{bubbles:true})); updateSaveButton(); return value;
@@ -538,7 +537,6 @@
       if (!validEmployee()) await askCatalogChoice('¿Trabajador?',catalog.empleados,$('empleado'),'trabajador');
       if (!validLabor()) await askCatalogChoice('¿Labor?',catalog.labores,$('labor'),'labor');
       
-      // BLINDAJE: Regla de horas (0.5 a 8 en pasos de 0.5)
       if (!validHours()) {
         await askNumber('¿Cuántas horas?', $('horas'), 
           n => n >= 0.5 && n <= 8 && (n * 2) % 1 === 0, 
@@ -547,7 +545,6 @@
         );
       }
       
-      // BLINDAJE: Regla de plantas (máximo el valor de la columna PlantasPorCaballon)
       if (!validPlants()) {
         const cab = matchCaballon($('caballon').value.trim());
         const maxPlantas = cab ? (Number(cab.PlantasPorCaballon) || Number(cab.plantasPorCaballon) || Number(cab.plantas) || Number(cab.matas) || 9999) : 9999;
