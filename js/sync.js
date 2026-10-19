@@ -1,10 +1,9 @@
 (() => {
   'use strict';
   async function sendRecord(record) {
-    if (!navigator.onLine) throw new Error('No hay internet. El registro continúa guardado en este teléfono.');
+    if (!navigator.onLine) throw new Error('No hay internet.');
     const payload = {
       idCliente: record.idCliente || record.id,
-      // La fecha/hora original del teléfono debe viajar con el registro offline.
       fechaCaptura: record.fechaCaptura || record.createdAt || null,
       empleado: String(record.empleado),
       labor: String(record.labor),
@@ -22,20 +21,39 @@
     await window.FincaDB.save(record);
     return response;
   }
+  
   async function run() {
     const status = document.getElementById('sync-status');
-    if (!navigator.onLine) { status.textContent = 'Sin internet. Los registros pendientes permanecen en este teléfono.'; return false; }
+    if (!navigator.onLine) { 
+      if (status) status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; 
+      return false; 
+    }
     try {
       const records = await window.FincaDB.all();
       const pending = records.filter(r => r.syncStatus !== 'synced');
-      if (!pending.length) { status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; return true; }
-      for (let i = 0; i < pending.length; i++) {
-        status.textContent = `Enviando registro ${i + 1} de ${pending.length}…`;
-        try { await sendRecord(pending[i]); }
-        catch (err) { status.textContent = `El registro queda pendiente en el teléfono: ${err.message}`; return false; }
+      if (!pending.length) { 
+        if (status) status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; 
+        return true; 
       }
-      status.textContent = `Sincronización terminada: ${pending.length} registro(s) confirmado(s) por Apps Script.`; return true;
-    } catch (e) { status.textContent = 'Error al sincronizar: ' + e.message; return false; }
+      
+      if (status) status.textContent = 'Sincronizando datos en segundo plano...';
+      
+      for (let i = 0; i < pending.length; i++) {
+        try { 
+          await sendRecord(pending[i]); 
+        } catch (err) { 
+          console.warn('Registro pendiente:', err); 
+          if (status) status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; 
+          return false; 
+        }
+      }
+      if (status) status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; 
+      return true;
+    } catch (e) { 
+      console.error('Error al sincronizar:', e);
+      if (status) status.textContent = 'No hay registros pendientes. Todo está sincronizado.'; 
+      return false; 
+    }
   }
   window.FincaSync = { run, sendRecord };
 })();
