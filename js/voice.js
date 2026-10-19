@@ -269,7 +269,7 @@
     return offlineModelPromise;
   }
 
-  function listenLocal(timeoutMs = 25000, acceptCandidate = null) {
+  function listenLocal(timeoutMs = 25000, acceptCandidate = null, options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let mediaStream = null;
@@ -279,7 +279,9 @@
       let recognizer = null;
       let timer = null;
       let partialTimer = null;
+      let oneWordTimer = null;
       let latestPartial = '';
+      let latestFinal = '';
 
       const candidateIsValid = text => {
         if (typeof acceptCandidate !== 'function') return false;
@@ -287,6 +289,7 @@
       };
       const cleanup = async () => {
         if (partialTimer) clearTimeout(partialTimer);
+        if (oneWordTimer) clearTimeout(oneWordTimer);
         if (processor) { try { processor.disconnect(); } catch (_) {} processor.onaudioprocess = null; }
         if (source) { try { source.disconnect(); } catch (_) {} }
         if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
@@ -300,6 +303,7 @@
         settled = true;
         if (timer) clearTimeout(timer);
         if (partialTimer) clearTimeout(partialTimer);
+        if (oneWordTimer) clearTimeout(oneWordTimer);
         void cleanup().then(() => {
           if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
           else {
@@ -321,30 +325,59 @@
             video: false
           });
           audioContext = await getLocalAudioContext();
-          recognizer = new offlineModel.KaldiRecognizer(16000);
+          // Si el Vosk incluido admite gramática, sesgar la escucha hacia los nombres
+          // reales del catálogo para esta pregunta. Si la versión no admite el segundo
+          // argumento, volver automáticamente al reconocedor abierto de la 0.5.9.
+          if (Array.isArray(options.grammarPhrases) && options.grammarPhrases.length) {
+            try {
+              recognizer = new offlineModel.KaldiRecognizer(16000, JSON.stringify(options.grammarPhrases));
+            } catch (grammarError) {
+              console.warn('Esta biblioteca Vosk no admite gramática contextual; se usará el reconocedor normal.', grammarError);
+            }
+          }
+          if (!recognizer) recognizer = new offlineModel.KaldiRecognizer(16000);
+          const tokenCount = text => String(text || '').trim().split(/\s+/).filter(Boolean).length;
+          const partialSettleMs = text => {
+            // Los números y sí/no son breves. Para nombres, labores e insumos
+            // damos una pausa mayor cuando solo llegó una palabra (p. ej. "Elkin")
+            // para no cortar el apellido que el trabajador todavía está diciendo.
+            if (options.kind === 'catalog' && tokenCount(text) < 2) {
+              return candidateIsValid(text) ? 2200 : 2800;
+            }
+            return candidateIsValid(text) ? 1500 : 2500;
+          };
           recognizer.on('result', message => {
+            if (settled) return;
             const text = String(message && message.result && message.result.text || '').trim();
-            if (text) finish(null, text);
+            if (!text) return;
+            latestFinal = text;
+            if (partialTimer) clearTimeout(partialTimer);
+            latestPartial = '';
+            // Si el motor finaliza solo el primer nombre, esperar brevemente a que
+            // llegue el apellido. Si no llega más audio, devolver la transcripción
+            // para que la aplicación pregunte de nuevo sin esperar 30 segundos.
+            if (options.kind === 'catalog' && tokenCount(text) < 2) {
+              if (oneWordTimer) clearTimeout(oneWordTimer);
+              oneWordTimer = setTimeout(() => finish(null, latestFinal), 2200);
+              return;
+            }
+            finish(null, text);
           });
           recognizer.on('partialresult', message => {
             if (settled) return;
             const partial = String(message && message.result && message.result.partial || '').trim();
             if (!partial) return;
             latestPartial = partial;
+            if (oneWordTimer) { clearTimeout(oneWordTimer); oneWordTimer = null; }
             status('Escuchando sin internet… Se reconoce: ' + partial);
             if (partialTimer) clearTimeout(partialTimer);
-            // Vosk liefert laufend partialresult. Wenn die Äußerung kurz pausiert,
-            // darf die App eine stabile Teiltranskription verwenden, statt bis zum
-            // Ende des gesamten Zeitfensters auf ein finales result zu warten.
+            // Antes, si el parcial no coincidía con el catálogo, la app podía esperar
+            // hasta los 30 s completos aunque ya hubiera silencio. Ahora entrega la
+            // transcripción estable para aplicar coincidencias y, si falla, repetir.
             partialTimer = setTimeout(() => {
               if (settled || !latestPartial) return;
-              // Para nombres/labores/insumos, preferir un parcial que ya coincida
-              // con el catálogo. Si aún no coincide, seguir escuchando hasta el
-              // resultado final o hasta agotar los mismos 30 s que usa el modo online.
-              if (typeof acceptCandidate !== 'function' || candidateIsValid(latestPartial)) {
-                finish(null, latestPartial);
-              }
-            }, 1400);
+              finish(null, latestPartial);
+            }, partialSettleMs(partial));
           });
           source = audioContext.createMediaStreamSource(mediaStream);
           processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -363,6 +396,7 @@
           status('Escuchando sin internet… Hable ahora.');
           timer = setTimeout(() => {
             if (latestPartial) finish(null, latestPartial);
+            else if (latestFinal) finish(null, latestFinal);
             else finish(new Error('No se escuchó una respuesta.'));
           }, timeoutMs);
         } catch (error) {
@@ -455,7 +489,7 @@
     });
   }
 
-  async function listen(timeoutMs = 25000, acceptCandidate = null) {
+  async function listen(timeoutMs = 25000, acceptCandidate = null, options = {}) {
     // IMPORTANTE: conectado a internet, conservar el reconocimiento del navegador,
     // que responde como en la versión que ya funcionaba. Vosk solo toma el turno
     // cuando no hay conexión o si el navegador no ofrece reconocimiento de voz.
@@ -472,7 +506,7 @@
         const message = String(error && error.message || error || '');
         if (/necesita internet|network|conexión.*reconocimiento/i.test(message) && offlineModel) {
           console.warn('Falló el servicio conectado; se probará Vosk local:', error);
-          return listenLocal(timeoutMs, acceptCandidate);
+          return listenLocal(timeoutMs, acceptCandidate, options);
         }
         throw error;
       }
@@ -480,7 +514,7 @@
 
     if (offlineModel || window.Vosk) {
       if (!offlineModel) await prepareOffline();
-      return listenLocal(timeoutMs, acceptCandidate);
+      return listenLocal(timeoutMs, acceptCandidate, options);
     }
     if (!navigator.onLine) throw new Error('El reconocimiento local no está preparado. Conéctese una vez y espere a que la voz sin conexión quede lista.');
     throw new Error('Este navegador no ofrece reconocimiento de voz conectado y el motor local no está listo.');
@@ -491,19 +525,22 @@
       .replace(/[^a-z0-9,.\s]/g, ' ').replace(/\s+/g, ' ').trim();
   }
   const smallNumbers = {
-    cero:0,un:1,uno:1,una:1,dos:2,tres:3,cuatro:4,cinco:5,sinco:5,sinko:5,cinko:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,
-    once:11,doce:12,trece:13,catorce:14,quince:15,dieciseis:16,diecisiete:17,dieciocho:18,diecinueve:19,
-    veinte:20,veintiuno:21,veintiun:21,veintiuna:21,veintidos:22,veintitres:23,veinticuatro:24,veinticinco:25,veintiseis:26,veintisiete:27,veintiocho:28,veintinueve:29,
+    cero:0,sero:0,un:1,uno:1,una:1,dos:2,tres:3,cuatro:4,cinco:5,sinco:5,sinko:5,cinko:5,seis:6,sies:6,seiz:6,
+    siete:7,siette:7,site:7,ocho:8,nueve:9,nuebe:9,diez:10,dies:10,diezs:10,
+    once:11,onse:11,doce:12,dose:12,trece:13,catorce:14,quince:15,quinse:15,
+    dieciseis:16,diecisiete:17,dieciocho:18,diecinueve:19,veinte:20,veintiuno:21,veintiun:21,veintiuna:21,
+    veintidos:22,veintitres:23,veinticuatro:24,veinticinco:25,veintiseis:26,veintisiete:27,veintiocho:28,veintinueve:29,
     treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,
     cien:100,ciento:100,doscientos:200,trescientos:300,cuatrocientos:400,quinientos:500,seiscientos:600,setecientos:700,ochocientos:800,novecientos:900,mil:1000,
     media:0.5,medio:0.5
   };
+  const NUMBER_UNITS = ['hora','horas','planta','plantas','mata','matas','kilo','kilos','kilogramo','kilogramos','gramo','gramos','litro','litros','unidad','unidades','cc','galon','galones'];
   function parseIntegerWords(section) {
-    const tokens = normalize(section).split(' ').filter(t => t && t !== 'y' && !['hora','horas','planta','plantas','mata','matas','kilo','kilos','kilogramo','kilogramos','gramos','litros','galones','unidad','unidades','cc'].includes(t));
+    const tokens = normalize(section).split(' ').filter(t => t && t !== 'y' && !NUMBER_UNITS.includes(t));
     if (!tokens.length) return null;
     let total = 0, current = 0, found = false;
     for (const token of tokens) {
-      if (!(token in smallNumbers)) return null;
+      if (!(token in smallNumbers) || smallNumbers[token] === 0.5) return null;
       found = true; const n = smallNumbers[token];
       if (n === 100) current = (current || 1) * 100;
       else if (n === 1000) { total += (current || 1) * 1000; current = 0; }
@@ -511,28 +548,45 @@
     }
     return found ? total + current : null;
   }
-  function parseNumber(text) {
-    let raw = normalize(text)
-      .replace(/\b(horas?|plantas?|matas?|kilos?|kilogramos?|gramos?|unidades?|litros?|cc|galones?)\b/g, '')
-      .replace(/\b(sinco|sinko|cinko)\b/g, 'cinco').trim();
-    const numeric = raw.match(/\d+(?:[.,]\d+)?/);
-    if (numeric) return Number(numeric[0].replace(',', '.'));
-    // 
-    // Admite "dos coma cinco" y "dos y media".
+  function parseNumberPhrase(raw) {
+    raw = normalize(raw).replace(/\b(sinco|sinko|cinko)\b/g, 'cinco')
+      .replace(/\b(sies|seiz)\b/g,'seis').replace(/\b(siette|site)\b/g,'siete')
+      .replace(/\b(nuebe|nue ve)\b/g,'nueve').replace(/\b(dies|diezs)\b/g,'diez')
+      .replace(/\b(quinse)\b/g,'quince').replace(/\b(onse)\b/g,'once').replace(/\b(dose)\b/g,'doce');
     const decimal = raw.split(/\b(?:coma|punto)\b/);
     if (decimal.length > 1) {
       const integer = parseIntegerWords(decimal[0]);
       const fractionTokens = normalize(decimal.slice(1).join(' ')).split(' ').filter(Boolean);
-      if (integer === null || !fractionTokens.length || fractionTokens.some(t => !(t in smallNumbers) || smallNumbers[t] < 0 || smallNumbers[t] > 9)) return null;
+      if (integer === null || !fractionTokens.length || fractionTokens.some(t => !(t in smallNumbers) || !Number.isInteger(smallNumbers[t]) || smallNumbers[t] < 0 || smallNumbers[t] > 9)) return null;
       return Number(String(integer) + '.' + fractionTokens.map(t => smallNumbers[t]).join(''));
     }
-    const half = /\by\s+media\b/.test(raw) || /\bmedia\b/.test(raw) || /\bmedio\b/.test(raw);
-    if (half) {
+    if (/\b(?:y\s+)?(?:media|medio)\b/.test(raw)) {
       const withoutHalf = raw.replace(/\by\s+media\b/g, '').replace(/\bmedia\b/g, '').replace(/\bmedio\b/g, '').trim();
       const base = parseIntegerWords(withoutHalf);
       return base === null ? 0.5 : base + 0.5;
     }
     return parseIntegerWords(raw);
+  }
+  function parseNumber(text) {
+    let raw = normalize(text)
+      .replace(/\b(horas?|plantas?|matas?|kilos?|kilogramos?|gramos?|unidades?|litros?|cc|galones?)\b/g, ' ')
+      .replace(/\b(nue\s+ve)\b/g, 'nueve')
+      .replace(/\s+/g, ' ').trim();
+    if (!raw) return null;
+    const numeric = raw.match(/\d+(?:[.,]\d+)?/);
+    if (numeric) return Number(numeric[0].replace(',', '.'));
+    // Intentar desde cada palabra-numero: admite respuestas con contexto como
+    // "son cinco plantas" o "tengo dos coma cinco horas" sin tragarse el resto.
+    const tokens = raw.split(' ');
+    for (let i = 0; i < tokens.length; i++) {
+      if (!(tokens[i] in smallNumbers) && !['coma','punto'].includes(tokens[i])) continue;
+      for (let j = tokens.length; j > i; j--) {
+        const candidate = tokens.slice(i,j).join(' ');
+        const parsed = parseNumberPhrase(candidate);
+        if (parsed !== null && Number.isFinite(parsed)) return parsed;
+      }
+    }
+    return parseNumberPhrase(raw);
   }
   async function welcome() {
     if (welcomePlayed) return true;

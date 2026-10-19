@@ -142,19 +142,29 @@
   // La pronunciación puede variar, pero solo se acepta una opción real y no ambigua del catálogo.
   function canonicalSpeech(text) {
     let s = normalize(text);
-    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj)\b/g,'deshoje');
-    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bka cloruro\b/g,'kcl');
+    // Retirar frases habituales que pueden quedar pegadas a la respuesta reconocida.
+    s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
+    s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
+    s = s.replace(/\bka\s+ce\s+ele\b|\bka\s+cl\b|\bkcloruro\b|\bka cloruro\b/g,'kcl');
     s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
-    // Variantes fonéticas frecuentes de reconocimiento de insumos y nombres propios.
-    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas)\b/g, 'insecticida');
-    // Las vocales y consonantes pueden variar en las transcripciones de nombres propios.
-    s = s.replace(/\b(elquin|elkyn|elkinh)\b/g, 'elkin');
-    // Variantes comunes de los dos insumos señalados en las pruebas de campo.
-    s = s.replace(/\b(codornasa|codornassa|codorna za)\b/g, 'codornaza');
-    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina za)\b/g, 'gallinaza');
-    return s;
+    // Variantes fonéticas frecuentes de reconocimiento de insumos.
+    s = s.replace(/\b(insec)\s+(ticida)\b/g, 'insecticida');
+    s = s.replace(/\b(inseticida|insectisida|insepticida|insecticidas|insetisida)\b/g, 'insecticida');
+    // Variantes comunes por errores y separación silábica del reconocedor local.
+    s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
+    s = s.replace(/\b(elquin|elkyn|elkinh|elkim|elquin)\b/g, 'elkin');
+    s = s.replace(/\b(san)\s+(dra)\b/g, 'sandra');
+    s = s.replace(/\b(res)\s+(trepo|trebo)\b/g, 'restrepo');
+    s = s.replace(/\b(rest)\s+(repo|rebo)\b/g, 'restrepo');
+    s = s.replace(/\b(restrebo|restrevo|restrepoo|restrepo)\b/g, 'restrepo');
+    // Variantes frecuentes de Codornaza y Gallinaza; no se altera el nombre real del catálogo.
+    s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
+    s = s.replace(/\b(codornasa|codornassa|codorna za|codornacia|codornaza)\b/g, 'codornaza');
+    s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
+    s = s.replace(/\b(gallinasa|gallinassa|galinaza|gallina za|gayinaza|gallinacia)\b/g, 'gallinaza');
+    return s.replace(/\s+/g,' ').trim();
   }
-  const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor']);
+  const STOP = new Set(['de','la','el','los','las','del','en','y','a','un','una','al','que','se','realice','realizar','realizo','trabajador','trabajadora','labor','insumo','utilice','utilizo','use','usar','por','favor','mi','me','yo','soy','nombre','llamo','es','diga','dijo','corresponde']);
   function meaningfulTokens(text) { return canonicalSpeech(text).split(/\s+/).filter(t => t.length > 1 && !STOP.has(t)); }
   function editDistance(a, b) {
     if (a === b) return 0;
@@ -177,9 +187,17 @@
     // Insumos: admite una diferencia fonética en palabras largas, sin confundir categorías distintas.
     if (type === 'trabajador') {
       if (shortest >= 5 && distance <= 1) return true;
-      if (shortest >= 8 && distance <= 2) return true;
+      if (shortest >= 8 && distance <= 2 && queryToken.slice(0,3) === itemToken.slice(0,3)) return true;
     }
-    if (type === 'insumo' && shortest >= 8 && distance <= 1) return true;
+    if (type === 'insumo') {
+      if (shortest >= 7 && distance <= 1) return true;
+      // Dos diferencias solo si el comienzo fonético coincide; evita saltar a otro insumo.
+      if (shortest >= 8 && distance <= 2 && queryToken.slice(0,4) === itemToken.slice(0,4)) return true;
+    }
+    if (type === 'labor') {
+      if (shortest >= 6 && distance <= 1) return true;
+      if (shortest >= 9 && distance <= 2 && queryToken.slice(0,4) === itemToken.slice(0,4)) return true;
+    }
     return false;
   }
   function matchCatalogVoice(text, items, type) {
@@ -223,6 +241,47 @@
     if (ranked.length > 1 && ranked[0].score === ranked[1].score) return null;
     return ranked[0].item;
   }
+  // El reconocedor local puede recibir una lista de frases esperadas para darles
+  // prioridad. Siempre se incluye [unk] como salida alternativa y solo se incluyen
+  // nombres reales del catálogo más variantes de pronunciación conocidas.
+  function buildVoiceGrammar(items, type) {
+    const phrases = new Set();
+    for (const item of items || []) {
+      const name = String(item && item.nombre || '').trim();
+      if (!name) continue;
+      phrases.add(name);
+      const canonical = canonicalSpeech(name);
+      if (type === 'trabajador') {
+        if (/\belkin\b/.test(canonical)) {
+          phrases.add(name.replace(/elkin/i, 'Elquin'));
+          phrases.add(name.replace(/elkin/i, 'Elkin'));
+        }
+        if (/\bflorez\b/.test(canonical)) phrases.add(name.replace(/florez/i, 'Flores'));
+        if (/\brestrepo\b/.test(canonical)) {
+          phrases.add(name.replace(/restrepo/i, 'Restrebo'));
+          phrases.add(name.replace(/restrepo/i, 'res trepo'));
+        }
+      }
+      if (type === 'insumo') {
+        if (/\bcodornaza\b/.test(canonical)) {
+          phrases.add(name.replace(/codornaza/i, 'Codornasa'));
+          phrases.add(name.replace(/codornaza/i, 'codor nasa'));
+        }
+        if (/\bgallinaza\b/.test(canonical)) {
+          phrases.add(name.replace(/gallinaza/i, 'Gallinasa'));
+          phrases.add(name.replace(/gallinaza/i, 'galli nasa'));
+        }
+        if (/\binsecticida\b/.test(canonical)) phrases.add(name.replace(/insecticida/i, 'Inseticida'));
+      }
+      if (type === 'labor' && /deshoj|deshoje/.test(canonical)) {
+        phrases.add(name.replace(/deshoje/i, 'Desoje'));
+        phrases.add(name.replace(/deshoje/i, 'Deshoj'));
+      }
+    }
+    phrases.add('[unk]');
+    return [...phrases].slice(0, 100);
+  }
+
   function matchCaballon(code) {
     const c = normalize(code).replace(/\s+/g,'');
     return catalog.caballones.find(x => normalize(x.codigoQR).replace(/\s+/g,'') === c) || null;
@@ -385,7 +444,7 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
-        const answer=await FincaVoice.listen(30000, candidate=>!!findVoiceMatch(candidate,items,kind));
+        const answer=await FincaVoice.listen(30000, candidate=>!!findVoiceMatch(candidate,items,kind), {kind:'catalog', catalogType:kind, grammarPhrases:buildVoiceGrammar(items, kind)});
         const item=findVoiceMatch(answer,items,kind);
         if (item) {
           select.value=String(item.id);
@@ -408,7 +467,7 @@
     while (true) {
       await FincaVoice.say(question, {silentError:true});
       try {
-        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);});
+        const answer=await FincaVoice.listen(30000, candidate=>{const n=FincaVoice.parseNumber(candidate);return n!==null && Number.isFinite(n) && validator(n);}, {kind:'number'});
         const value=FincaVoice.parseNumber(answer);
         if (value!==null && Number.isFinite(value) && validator(value)) {
           field.value=String(value); field.dispatchEvent(new Event('input',{bubbles:true})); field.dispatchEvent(new Event('change',{bubbles:true})); updateSaveButton(); return value;
@@ -423,7 +482,7 @@
     while (true) {
       await FincaVoice.say(question,{silentError:true});
       try {
-        const answer=await FincaVoice.listen(30000);
+        const answer=await FincaVoice.listen(30000, null, {kind:'text'});
         if (answer.trim()) return answer.trim();
       } catch (error) { if (isFatalVoiceError(error)) throw error; }
       attempts++;
@@ -435,7 +494,7 @@
     while (true) {
       await FincaVoice.say(question,{silentError:true});
       try {
-        const answer=await FincaVoice.listen(25000,candidate=>FincaVoice.yesNo(candidate)!==null);
+        const answer=await FincaVoice.listen(25000,candidate=>FincaVoice.yesNo(candidate)!==null, {kind:'yesno', grammarPhrases:['sí','no','si','no utilicé','no use','utilicé','usé','ninguno','ninguna','[unk]']});
         const result=FincaVoice.yesNo(answer); if(result!==null) return result;
       } catch (error) { if (isFatalVoiceError(error)) throw error; }
       attempts++;
