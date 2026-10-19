@@ -4,49 +4,15 @@
   let welcomePlayed = false;
   let audioUnlocked = false;
   let firstVoiceListCheck = false;
-  let localAudioContext = null;
-  let localAudioContextReady = Promise.resolve();
   const greetings = ['Gracias por su trabajo.','Su labor es importante.','Gracias por cuidar la finca.','Vamos a registrar su labor.','Gracias por su esfuerzo.','Su trabajo cuenta.','Bienvenido. Empecemos.','Gracias por su dedicación.'];
   
   function status(message) { const el = $('voice-status'); if (el) el.textContent = message; }
   
-  function getVoice() {
-    if (!('speechSynthesis' in window)) return null;
-    const voices = window.speechSynthesis.getVoices() || [];
-    return voices.find(v => /^es-CO$/i.test(v.lang)) || voices.find(v => /^es(-|$)/i.test(v.lang)) || null;
-  }
-  
-  function supportsRecognition() { return !!((window.Vosk && typeof window.Vosk.createModel === 'function') || window.SpeechRecognition || window.webkitSpeechRecognition); }
+  function supportsRecognition() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
   function supportsSpeechOutput() { return ('speechSynthesis' in window) && typeof SpeechSynthesisUtterance === 'function'; }
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
-  function primeLocalAudioContext() {
-    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextCtor) return Promise.reject(new Error('Este navegador no permite procesar audio local.'));
-    try {
-      if (!localAudioContext || localAudioContext.state === 'closed') {
-        try { localAudioContext = new AudioContextCtor({ sampleRate: 16000 }); }
-        catch (_) { localAudioContext = new AudioContextCtor(); }
-      }
-      if (localAudioContext.state !== 'running') {
-        localAudioContextReady = localAudioContext.resume().catch(error => { console.warn('No se pudo activar el contexto de audio:', error); });
-      } else {
-        localAudioContextReady = Promise.resolve();
-      }
-      return localAudioContextReady;
-    } catch (error) { return Promise.reject(error); }
-  }
-
-  async function getLocalAudioContext() {
-    await primeLocalAudioContext();
-    if (!localAudioContext || localAudioContext.state === 'closed') throw new Error('No se pudo activar el audio del micrófono. Toque la pantalla una vez y vuelva a probar.');
-    if (localAudioContext.state !== 'running') { try { await localAudioContext.resume(); } catch (_) {} }
-    if (localAudioContext.state !== 'running') throw new Error('El audio del micrófono está suspendido por el navegador. Toque la pantalla una vez y vuelva a probar.');
-    return localAudioContext;
-  }
-
   function unlockAudio() {
-    void primeLocalAudioContext().catch(error => console.warn('No se pudo preparar el audio local:', error));
     if (audioUnlocked || !supportsSpeechOutput()) return audioUnlocked;
     try {
       const synth = window.speechSynthesis;
@@ -78,7 +44,7 @@
 
   function say(text, opts = {}) {
     return new Promise(resolve => {
-      if (!supportsSpeechOutput()) { status('Este navegador no ofrece salida de voz.'); resolve(false); return; }
+      if (!supportsSpeechOutput()) { resolve(false); return; }
       let settled = false;
       let watchdog = null;
       const phrase = String(text || '').trim();
@@ -96,310 +62,11 @@
           if (spanish) { utterance.voice = spanish; utterance.lang = spanish.lang || 'es-CO'; }
           utterance.onstart = () => { audioUnlocked = true; if (opts.onStart) opts.onStart(); };
           utterance.onend = () => finish(true);
-          utterance.onerror = event => {
-            const reason = event && event.error ? event.error : 'error';
-            if (!opts.silentError) status('No se pudo reproducir el audio (' + reason + '). Toque una vez la pantalla y vuelva a intentar.');
-            finish(false);
-          };
+          utterance.onerror = () => { finish(false); };
           watchdog = setTimeout(() => finish(false), Math.min(16000, Math.max(5000, phrase.length * 145 + 3000)));
           await wait(80);
           synth.speak(utterance);
-        } catch (error) {
-          if (!opts.silentError) status('No se pudo reproducir el audio. Revise el sonido y los permisos del teléfono.');
-          finish(false);
-        }
-      })();
-    });
-  }
-
-  const VOSK_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/vosk-browser@0.0.5/dist/vosk.js';
-  const VOICE_MODEL_CACHE = 'finca-voice-model-cache-v3';
-  const VOICE_MODEL_KEY = new URL('./models/vosk-model-small-es-0.42.tar.gz', location.href).href;
-  const VOICE_MODEL_PARTS = ['./vosk-model-small-es-0.42.part01', './vosk-model-small-es-0.42.part02'];
-  const VOICE_MODEL_BYTES = 39817091;
-  let offlineModel = null;
-  let offlineModelPromise = null;
-  let archiveObjectUrl = null;
-  let activeLocalSession = null;
-
-  async function readResponseBytes(response, index, downloadedBefore) {
-    const expected = index === 0 ? 20000000 : 19817091;
-    const headerTotal = Number(response.headers.get('content-length')) || expected;
-    if (!response.body || !response.body.getReader) {
-      const buffer = await response.arrayBuffer();
-      const downloaded = downloadedBefore + buffer.byteLength;
-      status(`Descargando el reconocimiento local en español: ${Math.min(100, Math.round(downloaded / VOICE_MODEL_BYTES * 100))}%. Mantenga internet activo.`);
-      return new Uint8Array(buffer);
-    }
-    const reader = response.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while (true) {
-      const result = await reader.read();
-      if (result.done) break;
-      chunks.push(result.value);
-      received += result.value.byteLength;
-      const approxTotal = Math.max(expected, headerTotal);
-      const projected = downloadedBefore + Math.min(received, approxTotal);
-      status(`Descargando el reconocimiento local en español: ${Math.min(100, Math.round(projected / VOICE_MODEL_BYTES * 100))}%. Mantenga internet activo.`);
-    }
-    const out = new Uint8Array(received);
-    let offset = 0;
-    for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.byteLength; }
-    return out;
-  }
-
-  async function ensureVoskRuntimeCached() {
-    if (!('caches' in window)) throw new Error('El navegador no permite guardar el motor de voz en el teléfono.');
-    const cache = await caches.open('finca-pwa-v053-voz-local');
-    const cached = await cache.match(VOSK_SCRIPT_URL);
-    if (cached) return true;
-    if (!navigator.onLine) throw new Error('La biblioteca Vosk no está guardada en este teléfono. Abra la aplicación con internet para completar la preparación de voz.');
-    const response = await fetch(VOSK_SCRIPT_URL, { mode: 'cors', cache: 'no-cache' });
-    if (!response.ok) throw new Error('No se pudo guardar la biblioteca Vosk para usarla sin internet.');
-    await cache.put(VOSK_SCRIPT_URL, response.clone());
-    return true;
-  }
-
-  async function getModelArchive() {
-    if (!('caches' in window)) throw new Error('Este navegador no permite conservar el modelo de voz en el teléfono. Actualice Chrome.');
-    const cache = await caches.open(VOICE_MODEL_CACHE);
-    const cached = await cache.match(VOICE_MODEL_KEY);
-    if (cached) {
-      status('Modelo de español encontrado en el teléfono. Preparando la voz sin conexión…');
-      return await cached.blob();
-    }
-    if (!navigator.onLine) throw new Error('Todavía no se ha guardado el modelo de voz en este teléfono. Conéctese a internet y espere a que aparezca “Voz sin conexión lista”.');
-    const pieces = [];
-    let downloaded = 0;
-    for (let i = 0; i < VOICE_MODEL_PARTS.length; i++) {
-      status(`Descargando el modelo español para uso sin internet (${i + 1} de ${VOICE_MODEL_PARTS.length})…`);
-      const url = new URL(VOICE_MODEL_PARTS[i], location.href).href;
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`No se pudo descargar la parte ${i + 1} del modelo de voz (HTTP ${response.status}). Revise que los dos archivos estén publicados en la raíz del repositorio.`);
-      const bytes = await readResponseBytes(response, i, downloaded);
-      pieces.push(bytes);
-      downloaded += bytes.byteLength;
-    }
-    const total = pieces.reduce((sum, item) => sum + item.byteLength, 0);
-    if (total < 35000000) throw new Error('La descarga del modelo de voz parece incompleta. Revise los dos archivos part01 y part02 en GitHub.');
-    const blob = new Blob(pieces, { type: 'application/gzip' });
-    try { await cache.put(VOICE_MODEL_KEY, new Response(blob, { headers: { 'Content-Type': 'application/gzip' } })); } 
-    catch (error) { throw new Error('El modelo se descargó, pero el teléfono no pudo guardarlo para futuras sesiones sin internet. Libere espacio de almacenamiento y vuelva a abrir la aplicación con conexión.'); }
-    status('Modelo guardado en el teléfono. Cargando el motor de reconocimiento…');
-    return blob;
-  }
-
-  async function prepareOffline() {
-    if (offlineModel) return true;
-    if (offlineModelPromise) return offlineModelPromise;
-    offlineModelPromise = (async () => {
-      if (!window.Vosk || typeof window.Vosk.createModel !== 'function') throw new Error('No se pudo cargar la biblioteca local de voz. Abra la aplicación con internet una vez y espere a que termine la preparación.');
-      await ensureVoskRuntimeCached();
-      const archive = await getModelArchive();
-      archiveObjectUrl = URL.createObjectURL(archive);
-      try {
-        status('Inicializando el motor de voz en español. Puede tardar un poco la primera vez…');
-        offlineModel = await window.Vosk.createModel(archiveObjectUrl);
-        if (!offlineModel || typeof offlineModel.KaldiRecognizer !== 'function') throw new Error('El motor no devolvió un reconocedor válido.');
-        
-        status('Verificando que el modelo responda sin internet…');
-        const testRecognizer = new offlineModel.KaldiRecognizer(16000);
-        if (!testRecognizer) throw new Error('El modelo descargado no pudo iniciar el reconocedor.');
-        try {
-            const dummyBuffer = { length: 16000, numberOfChannels: 1, sampleRate: 16000, getChannelData: () => new Float32Array(16000) };
-            testRecognizer.acceptWaveform(dummyBuffer);
-        } catch (e) { console.warn('Prueba de audio en falso falló, pero el modelo cargó.', e); }
-        testRecognizer.remove();
-        
-        status('Voz sin conexión lista.');
-        return true;
-      } catch (error) {
-        throw new Error('No se pudo inicializar el modelo de español. Verifique que las dos partes del modelo se hayan publicado completas. Detalle: ' + (error && error.message ? error.message : error));
-      } finally {
-        if (archiveObjectUrl) { URL.revokeObjectURL(archiveObjectUrl); archiveObjectUrl = null; }
-      }
-    })().catch(error => {
-      status(error && error.message ? error.message : 'No se pudo preparar la voz sin conexión.');
-      throw error;
-    }).finally(() => { offlineModelPromise = null; });
-    return offlineModelPromise;
-  }
-
-  // NUEVO: Función matemática para convertir el audio de Android (48kHz) a la velocidad de Vosk (16kHz)
-  function downsampleBuffer(buffer, sampleRate, outSampleRate) {
-    if (outSampleRate === sampleRate) return buffer;
-    if (outSampleRate > sampleRate) return buffer;
-    var sampleRateRatio = sampleRate / outSampleRate;
-    var newLength = Math.round(buffer.length / sampleRateRatio);
-    var result = new Float32Array(newLength);
-    var offsetResult = 0;
-    var offsetBuffer = 0;
-    while (offsetResult < result.length) {
-      var nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-      var accum = 0, count = 0;
-      for (var i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-        accum += buffer[i];
-        count++;
-      }
-      result[offsetResult] = accum / count;
-      offsetResult++;
-      offsetBuffer = nextOffsetBuffer;
-    }
-    return result;
-  }
-
-  function listenLocal(timeoutMs = 25000, acceptCandidate = null, options = {}) {
-    return new Promise((resolve, reject) => {
-      let settled = false;
-      let mediaStream = null;
-      let audioContext = null;
-      let source = null;
-      let processor = null;
-      let recognizer = null;
-      let timer = null;
-      let partialTimer = null;
-      let oneWordTimer = null;
-      let latestPartial = '';
-      let latestFinal = '';
-
-      const candidateIsValid = text => {
-        if (typeof acceptCandidate !== 'function') return false;
-        try { return !!acceptCandidate(text); } catch (_) { return false; }
-      };
-      const cleanup = async () => {
-        if (partialTimer) clearTimeout(partialTimer);
-        if (oneWordTimer) clearTimeout(oneWordTimer);
-        if (processor) { try { processor.disconnect(); } catch (_) {} processor.onaudioprocess = null; }
-        if (source) { try { source.disconnect(); } catch (_) {} }
-        if (mediaStream) mediaStream.getTracks().forEach(track => { try { track.stop(); } catch (_) {} });
-        if (recognizer) { try { recognizer.remove(); } catch (_) {} }
-        if (activeLocalSession && activeLocalSession.recognizer === recognizer) activeLocalSession = null;
-      };
-      const finish = (error, text) => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        if (partialTimer) clearTimeout(partialTimer);
-        if (oneWordTimer) clearTimeout(oneWordTimer);
-        void cleanup().then(() => {
-          if (error) { status(error.message || 'No se pudo reconocer la respuesta.'); reject(error); }
-          else {
-            const recognized = String(text || '').trim();
-            status(recognized ? 'Respuesta detectada sin internet: ' + recognized : 'No se detectaron palabras.');
-            resolve(recognized);
-          }
-        });
-      };
-
-      (async () => {
-        try {
-          if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') throw new Error('Este navegador no ofrece acceso al micrófono. Abra la aplicación segura de GitHub Pages en Chrome.');
-          if (!offlineModel) await prepareOffline();
-          mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1, sampleRate: 16000 },
-            video: false
-          });
-          audioContext = await getLocalAudioContext();
-          
-          if (Array.isArray(options.grammarPhrases) && options.grammarPhrases.length) {
-            try {
-              const grammar = options.grammarPhrases.map(p => p.toLowerCase());
-              recognizer = new offlineModel.KaldiRecognizer(16000, JSON.stringify(grammar));
-            } catch (grammarError) {
-              console.warn('Fallo al aplicar gramática, usando reconocimiento abierto:', grammarError);
-            }
-          }
-          if (!recognizer) recognizer = new offlineModel.KaldiRecognizer(16000);
-          
-          const tokenCount = text => String(text || '').trim().split(/\s+/).filter(Boolean).length;
-          const partialSettleMs = text => {
-            if (options.kind === 'catalog' && tokenCount(text) < 2) return candidateIsValid(text) ? 2200 : 2800;
-            return candidateIsValid(text) ? 1500 : 2500;
-          };
-          
-          recognizer.on('result', message => {
-            if (settled) return;
-            const text = String(message && message.result && message.result.text || '').trim();
-            if (!text || text.includes('[unk]') || text.length < 2) return;
-            
-            if (typeof acceptCandidate === 'function' && !candidateIsValid(text)) {
-               status('No coincide con la lista. Escuchando de nuevo…');
-               return; 
-            }
-            latestFinal = text; 
-            if (partialTimer) clearTimeout(partialTimer);
-            latestPartial = '';
-            
-            if (options.kind === 'catalog' && tokenCount(text) < 2) {
-              if (oneWordTimer) clearTimeout(oneWordTimer);
-              oneWordTimer = setTimeout(() => finish(null, latestFinal), 2200);
-              return;
-            }
-            finish(null, text);
-          });
-          
-          recognizer.on('partialresult', message => {
-            if (settled) return;
-            const partial = String(message && message.result && message.result.partial || '').trim();
-            if (!partial || partial.includes('[unk]')) return;
-            
-            if (typeof acceptCandidate === 'function' && !candidateIsValid(partial)) {
-               status('Escuchando sin internet… (procesando)');
-               return; 
-            }
-            latestPartial = partial; 
-            if (oneWordTimer) { clearTimeout(oneWordTimer); oneWordTimer = null; }
-
-            status('Escuchando sin internet… Se reconoce: ' + partial);
-            if (partialTimer) clearTimeout(partialTimer);
-            partialTimer = setTimeout(() => {
-              if (settled || !latestPartial) return;
-              if (typeof acceptCandidate === 'function' && !candidateIsValid(latestPartial)) return;
-              finish(null, latestPartial);
-            }, partialSettleMs(partial));
-          });
-          
-          source = audioContext.createMediaStreamSource(mediaStream);
-          processor = audioContext.createScriptProcessor(4096, 1, 1);
-          
-          processor.onaudioprocess = event => {
-            if (settled || !recognizer) return;
-            
-            const inputBuffer = event.inputBuffer;
-            const originalBuffer = inputBuffer.getChannelData(0);
-            
-            // Usamos el resampler para forzar 16kHz (Arregla el "Efecto Pitufo")
-            const resampled = downsampleBuffer(originalBuffer, inputBuffer.sampleRate, 16000);
-            
-            const fakeBuffer = {
-              length: resampled.length,
-              numberOfChannels: 1,
-              sampleRate: 16000,
-              getChannelData: () => resampled
-            };
-            
-            try { recognizer.acceptWaveform(fakeBuffer); } catch (error) { console.error('Vosk acceptWaveform:', error); }
-            
-            const output = event.outputBuffer;
-            if (output) for (let channel = 0; channel < output.numberOfChannels; channel++) output.getChannelData(channel).fill(0);
-          };
-          
-          source.connect(processor);
-          processor.connect(audioContext.destination);
-          activeLocalSession = { recognizer, mediaStream, audioContext, source, processor };
-          status('Escuchando sin internet… Hable ahora.');
-          timer = setTimeout(() => {
-            if (latestPartial) finish(null, latestPartial);
-            else if (latestFinal) finish(null, latestFinal);
-            else finish(new Error('No se escuchó una respuesta.'));
-          }, timeoutMs);
-        } catch (error) {
-          let message = error && error.message ? error.message : String(error || 'Error del micrófono.');
-          if (error && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')) message = 'El micrófono está bloqueado. En Chrome, permita el micrófono para este sitio y vuelva a probar.';
-          else if (error && (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError')) message = 'No se encontró un micrófono disponible en el teléfono.';
-          finish(new Error(message));
-        }
+        } catch (error) { finish(false); }
       })();
     });
   }
@@ -407,13 +74,14 @@
   function listenBrowser(timeoutMs = 25000, acceptCandidate = null) {
     return new Promise((resolve, reject) => {
       const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!Recognition) { reject(new Error('El reconocimiento de voz del navegador no está disponible.')); return; }
+      if (!Recognition) { reject(new Error('El reconocimiento de voz no está disponible en este navegador. Use el teclado.')); return; }
       const rec = new Recognition();
       rec.lang = 'es-CO'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 5;
       let done = false, gotText = false, latestInterim = '';
       let silenceTimer = null;
       let responseTimer = null;
-      let startTimer = setTimeout(() => finish(new Error('El reconocimiento de voz no inició. Revise el permiso del micrófono y vuelva a intentarlo.')), 7000);
+      let startTimer = setTimeout(() => finish(new Error('El reconocimiento de voz no inició. Revise el permiso del micrófono.')), 7000);
+      
       function finish(err, text) {
         if (done) return;
         done = true;
@@ -440,7 +108,7 @@
       }
       rec.onstart = () => {
         if (startTimer) { clearTimeout(startTimer); startTimer = null; }
-        status('Escuchando con el servicio del navegador…');
+        status('Escuchando…');
         responseTimer = setTimeout(() => {
           if (latestInterim) finish(null, latestInterim);
           else finish(new Error('No se escuchó una respuesta.'));
@@ -463,11 +131,11 @@
       rec.onerror = event => {
         const err = event && event.error;
         if (latestInterim && (err === 'no-speech' || err === 'aborted')) { finish(null, latestInterim); return; }
-        if (err === 'not-allowed' || err === 'service-not-allowed') finish(new Error('El micrófono está bloqueado. Permita su uso para este sitio.'));
+        if (err === 'not-allowed' || err === 'service-not-allowed') finish(new Error('El micrófono está bloqueado.'));
         else if (err === 'audio-capture') finish(new Error('No se encontró un micrófono disponible.'));
-        else if (err === 'network') finish(new Error('El reconocimiento del navegador necesita internet. El motor local todavía no está listo.'));
+        else if (err === 'network') finish(new Error('El reconocimiento del navegador necesita internet.'));
         else if (err === 'no-speech') finish(new Error('No se escuchó una respuesta.'));
-        else finish(new Error('No se pudo reconocer la voz (' + (err || 'error') + ').'));
+        else finish(new Error('No se pudo reconocer la voz.'));
       };
       rec.onend = () => {
         if (latestInterim) finish(null, latestInterim);
@@ -478,32 +146,18 @@
   }
 
   async function listen(timeoutMs = 25000, acceptCandidate = null, options = {}) {
-    const BrowserRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (navigator.onLine && BrowserRecognition) {
-      try {
-        return await listenBrowser(timeoutMs, acceptCandidate);
-      } catch (error) {
-        const message = String(error && error.message || error || '');
-        if (/necesita internet|network|conexión.*reconocimiento/i.test(message) && offlineModel) {
-          return listenLocal(timeoutMs, acceptCandidate, options);
-        }
-        throw error;
-      }
-    }
-    if (offlineModel || window.Vosk) {
-      if (!offlineModel) await prepareOffline();
-      return listenLocal(timeoutMs, acceptCandidate, options);
-    }
-    if (!navigator.onLine) throw new Error('El reconocimiento local no está preparado. Conéctese una vez y espere a que la voz sin conexión quede lista.');
-    throw new Error('Este navegador no ofrece reconocimiento de voz conectado y el motor local no está listo.');
+    if (!navigator.onLine) throw new Error('Sin internet. Complete el formulario manualmente.');
+    return listenBrowser(timeoutMs, acceptCandidate);
   }
 
   function normalize(s) {
     return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9,.\s]/g, ' ').replace(/\s+/g, ' ').trim();
   }
-  const smallNumbers = { cero:0,sero:0,un:1,uno:1,una:1,dos:2,tres:3,cuatro:4,cinco:5,sinco:5,sinko:5,cinko:5,seis:6,sies:6,seiz:6,siete:7,siette:7,site:7,ocho:8,nueve:9,nuebe:9,diez:10,dies:10,diezs:10,once:11,onse:11,doce:12,dose:12,trece:13,catorce:14,quince:15,quinse:15,dieciseis:16,diecisiete:17,dieciocho:18,diecinueve:19,veinte:20,veintiuno:21,veintiun:21,veintiuna:21,veintidos:22,veintitres:23,veinticuatro:24,veinticinco:25,veintiseis:26,veintisiete:27,veintiocho:28,veintinueve:29,treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,ciento:100,doscientos:200,trescientos:300,cuatrocientos:400,quinientos:500,seiscientos:600,setecientos:700,ochocientos:800,novecientos:900,mil:1000,media:0.5,medio:0.5 };
-  const NUMBER_UNITS = ['hora','horas','planta','plantas','mata','matas','kilo','kilos','kilogramo','kilogramos','gramo','gramos','litro','litros','unidad','unidades','cc','galon','galones'];
+  
+  const smallNumbers = { cero:0,un:1,uno:1,una:1,dos:2,tres:3,cuatro:4,cinco:5,seis:6,siete:7,ocho:8,nueve:9,diez:10,once:11,doce:12,trece:13,catorce:14,quince:15,dieciseis:16,diecisiete:17,dieciocho:18,diecinueve:19,veinte:20,veintiuno:21,veintiun:21,veintiuna:21,veintidos:22,veintitres:23,veinticuatro:24,veinticinco:25,veintiseis:26,veintisiete:27,veintiocho:28,veintinueve:29,treinta:30,cuarenta:40,cincuenta:50,sesenta:60,setenta:70,ochenta:80,noventa:90,cien:100,ciento:100,doscientos:200,trescientos:300,cuatrocientos:400,quinientos:500,seiscientos:600,setecientos:700,ochocientos:800,novecientos:900,mil:1000,media:0.5,medio:0.5 };
+  const NUMBER_UNITS = ['hora','horas','planta','plantas','mata','matas','kilo','kilos','gramo','gramos','litro','litros','unidad','unidades','cc','galon','galones'];
+  
   function parseIntegerWords(section) {
     const tokens = normalize(section).split(' ').filter(t => t && t !== 'y' && !NUMBER_UNITS.includes(t));
     if (!tokens.length) return null;
@@ -534,7 +188,7 @@
     return parseIntegerWords(raw);
   }
   function parseNumber(text) {
-    let raw = normalize(text).replace(/\b(horas?|plantas?|matas?|kilos?|kilogramos?|gramos?|unidades?|litros?|cc|galones?)\b/g, ' ').replace(/\b(nue\s+ve)\b/g, 'nueve').replace(/\s+/g, ' ').trim();
+    let raw = normalize(text).replace(/\b(horas?|plantas?|matas?|kilos?|gramos?|unidades?|litros?|cc|galones?)\b/g, ' ').replace(/\s+/g, ' ').trim();
     if (!raw) return null;
     const numeric = raw.match(/\d+(?:[.,]\d+)?/);
     if (numeric) return Number(numeric[0].replace(',', '.'));
@@ -549,6 +203,7 @@
     }
     return parseNumberPhrase(raw);
   }
+  
   async function welcome() {
     if (welcomePlayed) return true;
     const phrase = greetings[Math.floor(Math.random() * greetings.length)];
@@ -556,11 +211,17 @@
     if (ok) welcomePlayed = true;
     return ok;
   }
+  
   function yesNo(text) {
     const s = normalize(text);
     if (/\b(no|ninguno|ninguna|ningun|nada|no use|no utilice|no quiero|cancelar)\b/.test(s)) return false;
     if (/\b(si|claro|correcto|afirmativo|utilice|use|listo|guardar|guarde|de acuerdo)\b/.test(s)) return true;
     return null;
   }
-  window.FincaVoice = { say, listen, parseNumber, normalize, yesNo, welcome, status, unlockAudio, supportsRecognition, supportsSpeechOutput, prepareOffline, isOfflineReady: () => !!offlineModel };
+  
+  window.FincaVoice = { 
+    say, listen, parseNumber, normalize, yesNo, welcome, status, unlockAudio, supportsRecognition, supportsSpeechOutput, 
+    prepareOffline: async () => true, 
+    isOfflineReady: () => true 
+  };
 })();
