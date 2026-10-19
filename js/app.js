@@ -65,6 +65,10 @@
   }
   document.addEventListener('visibilitychange', () => {
     if (interviewRunning && document.visibilityState === 'visible') void holdScreenAwake();
+    // NUEVO: Intentar sincronizar cuando el usuario vuelve a la app
+    if (document.visibilityState === 'visible' && navigator.onLine) {
+      void syncAndRender();
+    }
   });
 
   function showNotice(text, kind = 'info') {
@@ -631,6 +635,12 @@
   void locate();
   void loadCatalogs();
   void renderRecords();
+  
+  // NUEVO: Intentar sincronizar automáticamente al abrir la app
+  if (navigator.onLine) {
+    void syncAndRender();
+  }
+
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js',{updateViaCache:'none'}).then(reg=>reg.update()).catch(err=>console.warn('No se pudo actualizar el caché PWA:',err)));
   }
