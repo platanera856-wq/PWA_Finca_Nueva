@@ -91,14 +91,20 @@
         try { rec.abort(); } catch (_) {}
         if (err) reject(err); else resolve(text);
       }
+      
       function choose(candidates) {
         const valid = candidates.map(value => String(value || '').trim()).filter(Boolean);
         if (!valid.length) return '';
         if (typeof acceptCandidate === 'function') {
-          try { return valid.find(candidate => acceptCandidate(candidate)) || valid[0]; } catch (_) {}
+          try {
+            const match = valid.find(candidate => acceptCandidate(candidate));
+            if (match) return match;
+            return ''; 
+          } catch (_) {}
         }
         return valid[0];
       }
+      
       function scheduleInterim(text) {
         if (!text) return;
         latestInterim = text;
