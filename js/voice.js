@@ -99,10 +99,9 @@
           try {
             const match = valid.find(candidate => acceptCandidate(candidate));
             if (match) return match;
-            return ''; 
           } catch (_) {}
         }
-        return valid[0];
+        return valid[0]; // Volvemos a la primera opción si el filtro falla
       }
       
       function scheduleInterim(text) {
