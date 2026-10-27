@@ -161,22 +161,14 @@
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
     
-    // Correcciones para KCl
     s = s.replace(/\bk\s*c\s*l\b|\b(ka|ca)\s*(ce|se|ze)\s*(ele|le|cle)\b/g, 'kcl');
     s = s.replace(/\bkcloruro\b|\bka cloruro\b/g,'kcl');
-    
-    // Correcciones para DAP
     s = s.replace(/\bde\s*a\s*pe\b|\bdeape\b/g,'dap');
-    
-    // Correcciones para Urea
     s = s.replace(/\b(urrea|ure a)\b/g, 'urea');
-
-    // Correcciones para Herbicida
     s = s.replace(/\b(herbisida|ervicida|hervicida|erbicida|elvis ida)\b/g, 'herbicida');
 
     s = s.replace(/z/g, 's');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
-    s = s.replace(/\b(h)([aeiou])/g, '$2'); 
     s = s.replace(/\b(codor)\s+(nasa|naza)\b/g, 'codornaza');
     s = s.replace(/\b(galli)\s+(nasa|naza)\b/g, 'gallinaza');
     s = s.replace(/\b(el)\s+(kin|quin)\b/g, 'elkin');
@@ -253,8 +245,9 @@
       const exactHitCount = itemTokens.filter(t => queryTokens.has(t)).length;
       score += exactHitCount * 3;
 
+      // CORRECCIÓN CLAVE: Penalización por ruido a 0.
       const unmatchedQueryTokens = queryList.filter(q => !itemTokens.some(t => tokenMatches(q, t, type)));
-      score -= unmatchedQueryTokens.length * 5; 
+      score -= unmatchedQueryTokens.length * 0; 
 
       if (score < 10) continue;
       ranked.push({item,score});
@@ -317,9 +310,7 @@
   }
   
   function scheduleAutomaticInterview(code) {
-    if (!navigator.onLine) {
-      return;
-    }
+    if (!navigator.onLine) return;
     if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
     qrAlreadyLaunched = code;
     autoVoicePending = true;
