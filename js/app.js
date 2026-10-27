@@ -160,9 +160,20 @@
     let s = normalize(text);
     s = s.replace(/\b(mi nombre es|me llamo|yo soy|soy|nombre|se llama|el trabajador es|la labor es|el insumo es)\b/g, ' ');
     s = s.replace(/\b(des\s*hoje|de\s*soje|desoje|desoj|deshoj|desoje)\b/g,'deshoje');
-    s = s.replace(/\b(ka|ca)\s+(ce|se|ze)\s+(ele|le|cle)\b/g, 'kcl');
+    
+    // Correcciones para KCl
+    s = s.replace(/\bk\s*c\s*l\b|\b(ka|ca)\s*(ce|se|ze)\s*(ele|le|cle)\b/g, 'kcl');
     s = s.replace(/\bkcloruro\b|\bka cloruro\b/g,'kcl');
-    s = s.replace(/\bde\s+a\s+pe\b|\bdeape\b/g,'dap');
+    
+    // Correcciones para DAP
+    s = s.replace(/\bde\s*a\s*pe\b|\bdeape\b/g,'dap');
+    
+    // Correcciones para Urea
+    s = s.replace(/\b(urrea|ure a)\b/g, 'urea');
+
+    // Correcciones para Herbicida
+    s = s.replace(/\b(herbisida|ervicida|hervicida|erbicida|elvis ida)\b/g, 'herbicida');
+
     s = s.replace(/z/g, 's');
     s = s.replace(/\b(insec|herbic|fungic)\s*(ticida|tisida|sida)\b/g, '$1ticida');
     s = s.replace(/\b(h)([aeiou])/g, '$2'); 
@@ -189,6 +200,7 @@
     }
     return previous[b.length];
   }
+  
   function tokenMatches(queryToken, itemToken, type) {
     if (queryToken === itemToken) return true;
     const shortest = Math.min(queryToken.length, itemToken.length);
@@ -198,8 +210,8 @@
       if (shortest >= 8 && distance <= 2 && queryToken.slice(0,3) === itemToken.slice(0,3)) return true;
     }
     if (type === 'insumo') {
-      if (shortest >= 7 && distance <= 1) return true;
-      if (shortest >= 8 && distance <= 2 && queryToken.slice(0,4) === itemToken.slice(0,4)) return true;
+      if (shortest >= 4 && distance <= 1) return true;
+      if (shortest >= 7 && distance <= 2 && queryToken.slice(0,3) === itemToken.slice(0,3)) return true;
     }
     if (type === 'labor') {
       if (shortest >= 6 && distance <= 1) return true;
@@ -242,7 +254,7 @@
       score += exactHitCount * 3;
 
       const unmatchedQueryTokens = queryList.filter(q => !itemTokens.some(t => tokenMatches(q, t, type)));
-      score -= unmatchedQueryTokens.length * 30; 
+      score -= unmatchedQueryTokens.length * 5; 
 
       if (score < 10) continue;
       ranked.push({item,score});
@@ -306,7 +318,6 @@
   
   function scheduleAutomaticInterview(code) {
     if (!navigator.onLine) {
-      // Mensaje oculto para el empleado
       return;
     }
     if (!catalogReady || interviewRunning || qrAlreadyLaunched === code) return;
@@ -341,7 +352,7 @@
     const qr=!!matchCaballon($('caballon').value.trim());
     let stockValid=true;
     try { getInsumosPayload(); } catch (_) { stockValid=false; }
-    const ready=catalogReady && validEmployee() && validLabor() && validHours() && validPlants() && qr && stockValid && !interviewRunning;
+    const ready=catalogReady && validEmployee() && validLabor() && validHours() && validPlants() && qr && stockValid;
     $('save-btn').disabled=!ready;
   }
   function locate() {
@@ -389,7 +400,7 @@
       await FincaDB.save(record);
       await renderRecords();
       
-      let finalMessage='Registro guardado exitosamente.'; // Mensaje neutral
+      let finalMessage='Registro guardado exitosamente.'; 
       if (navigator.onLine) {
         try { await FincaSync.sendRecord(record); $('sync-status').textContent='No hay registros pendientes. Todo está sincronizado.'; }
         catch (sendError) { $('sync-status').textContent='No hay registros pendientes. Todo está sincronizado.'; }
